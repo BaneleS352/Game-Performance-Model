@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 
 from .features import OBSERVATION_WINDOW_DAYS, PREDICTION_WEEK_END, REGRESSION_TARGETS, build_four_week_snapshot, prepare_features
+from .modeling import confidence_from_prediction, _baseline_prediction, _prediction_from_fit
 
 
 def assign_merchandising_recommendation(row: pd.Series) -> str:
@@ -27,11 +28,17 @@ def score_snapshot(snapshot: pd.DataFrame, model_bundle: dict) -> pd.DataFrame:
         if target not in REGRESSION_TARGETS:
             continue
         short = target.replace("target_", "")
-        pred = model.predict(x)
-        if target in REGRESSION_TARGETS:
-            pred = np.maximum(pred, 0)
+        transform = model_bundle.get("target_transforms", {}).get(target, "raw")
+        model_pred = _prediction_from_fit(target, model.predict(x), transform)
+        baseline_pred = _baseline_prediction(snapshot, target)
+        blend_weight = model_bundle.get("blend_weights", {}).get(target, 1.0)
+        pred = blend_weight * model_pred + (1 - blend_weight) * baseline_pred
         result[f"predicted_{short}_week_4"] = pred
-        result[f"confidence_{short}"] = model_bundle.get("confidence_scores", {}).get(target, np.nan)
+        result[f"confidence_{short}"] = confidence_from_prediction(
+            pred,
+            model_bundle.get("confidence_tables", {}).get(target),
+            snapshot.get("observation_coverage"),
+        )
     result["recommendation"] = result.apply(assign_merchandising_recommendation, axis=1)
     result["scored_at"] = pd.Timestamp.now(tz="UTC")
     return result

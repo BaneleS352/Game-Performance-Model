@@ -17,10 +17,21 @@ VALIDATION_WEEK_END = 21
 PREDICTION_WEEK_START = 22
 PREDICTION_WEEK_END = 28
 
-BASE_CATEGORICAL_FEATURES = ["SystemName", "TournamentName", "Launch_Month", "Launch_Weekday"]
+BASE_CATEGORICAL_FEATURES = [
+    "SystemName",
+    "TournamentName",
+    "Launch_Month",
+    "Launch_Weekday",
+    "Clients_Size_Band",
+    "Stakes_Size_Band",
+]
 BASE_NUMERIC_FEATURES = [
     "Obs_Window", "Horizon",
     "obs_clients_sum", "obs_betcount_sum", "obs_stakes_sum", "obs_ggr_sum", "obs_ggr_pct",
+    "clients_week_1_sum", "clients_week_2_sum", "clients_week_1_to_2_growth",
+    "stakes_week_1_sum", "stakes_week_2_sum", "stakes_week_1_to_2_growth",
+    "stake_per_client_week_1", "stake_per_client_week_2",
+    "log_obs_clients_sum", "log_obs_stakes_sum", "log_clients_week_2_sum", "log_stakes_week_2_sum",
     "obs_clients_mean", "obs_betcount_mean", "obs_stakes_mean", "obs_ggr_mean",
     "obs_clients_std", "obs_betcount_std", "obs_stakes_std", "obs_ggr_std",
     "bets_per_client", "stake_per_client", "ggr_per_client",
@@ -52,7 +63,7 @@ def model_features(df: pd.DataFrame) -> list[str]:
 
 
 def _safe_divide(numerator: float, denominator: float) -> float:
-    if denominator is None or pd.isna(denominator) or denominator == 0:
+    if numerator is None or pd.isna(numerator) or denominator is None or pd.isna(denominator) or denominator == 0:
         return np.nan
     return float(numerator / denominator)
 
@@ -75,6 +86,24 @@ def _first_last_growth(values: Iterable[float]) -> float:
     if pd.isna(first_mean) or first_mean == 0:
         return np.nan
     return float((last_mean - first_mean) / abs(first_mean))
+
+
+def _size_band(value: float, thresholds: tuple[float, float, float]) -> str:
+    if pd.isna(value) or value <= 0:
+        return "No activity"
+    if value < thresholds[0]:
+        return "Small"
+    if value < thresholds[1]:
+        return "Medium"
+    if value < thresholds[2]:
+        return "Large"
+    return "Very large"
+
+
+def _safe_log1p(value: float) -> float:
+    if pd.isna(value):
+        return np.nan
+    return float(np.log1p(max(value, 0)))
 
 
 def _recent_mean(values: Iterable[float], window: int) -> float:
@@ -166,6 +195,28 @@ def build_lifecycle_snapshot(
         row["stake_per_client"] = _safe_divide(row["obs_stakes_sum"], row["obs_clients_sum"])
         row["ggr_per_client"] = _safe_divide(row["obs_ggr_sum"], row["obs_clients_sum"])
 
+        week_1_obs = obs[obs["Days_Since_First_Observed"].between(1, 7)]
+        week_2_obs = obs[obs["Days_Since_First_Observed"].between(8, obs_window)]
+        clients_week_1 = week_1_obs["Clients"].sum(min_count=1)
+        clients_week_2 = week_2_obs["Clients"].sum(min_count=1)
+        stakes_week_1 = week_1_obs["Stakes"].sum(min_count=1)
+        stakes_week_2 = week_2_obs["Stakes"].sum(min_count=1)
+
+        row["clients_week_1_sum"] = clients_week_1
+        row["clients_week_2_sum"] = clients_week_2
+        row["clients_week_1_to_2_growth"] = _safe_divide(clients_week_2 - clients_week_1, abs(clients_week_1))
+        row["stakes_week_1_sum"] = stakes_week_1
+        row["stakes_week_2_sum"] = stakes_week_2
+        row["stakes_week_1_to_2_growth"] = _safe_divide(stakes_week_2 - stakes_week_1, abs(stakes_week_1))
+        row["stake_per_client_week_1"] = _safe_divide(stakes_week_1, clients_week_1)
+        row["stake_per_client_week_2"] = _safe_divide(stakes_week_2, clients_week_2)
+        row["log_obs_clients_sum"] = _safe_log1p(row["obs_clients_sum"])
+        row["log_obs_stakes_sum"] = _safe_log1p(row["obs_stakes_sum"])
+        row["log_clients_week_2_sum"] = _safe_log1p(clients_week_2)
+        row["log_stakes_week_2_sum"] = _safe_log1p(stakes_week_2)
+        row["Clients_Size_Band"] = _size_band(row["obs_clients_sum"], (100, 1_000, 10_000))
+        row["Stakes_Size_Band"] = _size_band(row["obs_stakes_sum"], (10_000, 100_000, 1_000_000))
+
         if require_future:
             # Future rows are targets only; no future-derived column is used as a feature.
             week_1 = game[game["Days_Since_First_Observed"].between(obs_window + 1, obs_window + 7)].copy()
@@ -224,14 +275,17 @@ def build_four_week_snapshot(
 def prepare_features(frame: pd.DataFrame, categorical: list[str] | None = None) -> pd.DataFrame:
     categorical = categorical or categorical_features(frame)
     result = frame.copy()
+    missing = {}
     for column in BASE_NUMERIC_FEATURES:
         if column not in result.columns:
             result[column] = np.nan
-        result[f"missing__{column}"] = result[column].isna().astype("int8")
+        result[column] = pd.to_numeric(result[column], errors="coerce")
+        missing[f"missing__{column}"] = result[column].isna().astype("int8")
     for column in categorical:
         if column not in result.columns:
             result[column] = "Unknown"
         result[column] = result[column].astype("string").fillna("Unknown")
+    result = pd.concat([result, pd.DataFrame(missing, index=result.index)], axis=1)
     return result[categorical + BASE_NUMERIC_FEATURES + missing_indicator_features()]
 
 

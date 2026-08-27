@@ -163,6 +163,7 @@ def build_holdout_comparison(
                 f"actual_{metric}_week_3",
                 f"actual_{metric}_week_4",
                 f"week_3_to_week_4_{metric}_growth_pct",
+                f"baseline_{metric}_week_4",
                 f"predicted_{metric}_week_4",
                 f"confidence_{metric}",
                 f"variance_{metric}",

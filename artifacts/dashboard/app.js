@@ -1,0 +1,165 @@
+(function () {
+  const data = window.DASHBOARD_DATA;
+  const state = {
+    view: "top_stakes",
+    search: "",
+    system: "",
+    sort: "predicted_stakes_week_4",
+  };
+
+  const money = new Intl.NumberFormat("en-ZA", {
+    style: "currency",
+    currency: "ZAR",
+    maximumFractionDigits: 0,
+  });
+  const whole = new Intl.NumberFormat("en-ZA", { maximumFractionDigits: 0 });
+  const pct = new Intl.NumberFormat("en-ZA", { style: "percent", maximumFractionDigits: 0 });
+
+  const byId = (id) => document.getElementById(id);
+  const number = (value) => Number(value || 0);
+  const fmtMoney = (value) => money.format(number(value));
+  const fmtWhole = (value) => whole.format(number(value));
+  const fmtPct = (value) => pct.format(number(value));
+
+  function setText(id, value) {
+    byId(id).textContent = value;
+  }
+
+  function renderSummary() {
+    const summary = data.summary;
+    setText("asOfDate", summary.as_of_date ? `As of ${summary.as_of_date}` : "Latest forecast");
+    setText("totalStakes", fmtMoney(summary.total_predicted_stakes_week_4));
+    setText("totalClients", fmtWhole(summary.total_predicted_clients_week_4));
+    setText("gamesScored", fmtWhole(summary.games_scored));
+    setText("systemsScored", `${fmtWhole(summary.systems_scored)} systems scored`);
+    setText("confidenceBlend", fmtPct((number(summary.confidence_clients) + number(summary.confidence_stakes)) / 2));
+    setText("within10", fmtPct(1 - number(summary.holdout_off_by_10_rate)));
+    setText("within20", fmtPct(1 - number(summary.holdout_off_by_20_rate)));
+    setText("clientProbability", fmtPct(summary.avg_probability_clients));
+    setText("stakesProbability", fmtPct(summary.avg_probability_stakes));
+  }
+
+  function renderSystemOptions() {
+    const select = byId("systemFilter");
+    data.systems
+      .map((row) => row.SystemName)
+      .sort((a, b) => a.localeCompare(b))
+      .forEach((system) => {
+        const option = document.createElement("option");
+        option.value = system;
+        option.textContent = system;
+        select.appendChild(option);
+      });
+  }
+
+  function renderSystemBars() {
+    const top = data.systems.slice(0, 10);
+    const max = Math.max(...top.map((row) => number(row.predicted_stakes_week_4)), 1);
+    byId("systemCount").textContent = `Top ${top.length} of ${data.systems.length} systems by stakes`;
+    byId("systemBars").innerHTML = top
+      .map((row) => {
+        const width = Math.max(3, (number(row.predicted_stakes_week_4) / max) * 100);
+        return `
+          <div class="system-row">
+            <div>
+              <div class="system-name">${escapeHtml(row.SystemName || "Unknown")}</div>
+              <div class="subtle">${fmtWhole(row.games)} games</div>
+            </div>
+            <div class="bar-track" aria-hidden="true"><div class="bar-fill" style="width:${width}%"></div></div>
+            <div class="num">${fmtMoney(row.predicted_stakes_week_4)}</div>
+          </div>`;
+      })
+      .join("");
+  }
+
+  function rowsForView() {
+    return data[state.view] || data.forecasts || [];
+  }
+
+  function filteredRows() {
+    const query = state.search.trim().toLowerCase();
+    return rowsForView()
+      .filter((row) => !state.system || row.SystemName === state.system)
+      .filter((row) => {
+        if (!query) return true;
+        return `${row.TournamentName || ""} ${row.SystemName || ""}`.toLowerCase().includes(query);
+      })
+      .sort((a, b) => number(b[state.sort]) - number(a[state.sort]));
+  }
+
+  function signalFor(row) {
+    const confidence = Math.min(number(row.confidence_clients), number(row.confidence_stakes));
+    const highValue = number(row.predicted_stakes_week_4) > 1000000 || number(row.predicted_clients_week_4) > 5000;
+    if (highValue && confidence < 0.5) return ["Review", "review"];
+    if (highValue) return ["Prioritize", "priority"];
+    return ["Monitor", "review"];
+  }
+
+  function renderRows() {
+    const rows = filteredRows();
+    byId("rowCount").textContent = `${fmtWhole(rows.length)} games shown`;
+    byId("gameRows").innerHTML = rows
+      .slice(0, 300)
+      .map((row) => {
+        const [label, klass] = signalFor(row);
+        return `
+          <tr>
+            <td>
+              <div class="game-title">${escapeHtml(row.TournamentName || row.Game_ID || "Unknown game")}</div>
+              <div class="subtle">${escapeHtml(row.Game_ID || "")}</div>
+            </td>
+            <td>${escapeHtml(row.SystemName || "Unknown")}</td>
+            <td class="num">${fmtMoney(row.predicted_stakes_week_4)}</td>
+            <td class="num">${fmtPct(row.confidence_stakes)}</td>
+            <td class="num">${fmtWhole(row.predicted_clients_week_4)}</td>
+            <td class="num">${fmtPct(row.confidence_clients)}</td>
+            <td><span class="signal ${klass}">${label}</span></td>
+          </tr>`;
+      })
+      .join("");
+  }
+
+  function bindControls() {
+    document.querySelectorAll(".tab").forEach((button) => {
+      button.addEventListener("click", () => {
+        document.querySelectorAll(".tab").forEach((tab) => tab.classList.remove("active"));
+        button.classList.add("active");
+        state.view = button.dataset.view;
+        renderRows();
+      });
+    });
+    byId("searchInput").addEventListener("input", (event) => {
+      state.search = event.target.value;
+      renderRows();
+    });
+    byId("systemFilter").addEventListener("change", (event) => {
+      state.system = event.target.value;
+      renderRows();
+    });
+    byId("sortSelect").addEventListener("change", (event) => {
+      state.sort = event.target.value;
+      renderRows();
+    });
+  }
+
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, (char) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#039;",
+    })[char]);
+  }
+
+  if (!data) {
+    document.body.innerHTML = "<main class=\"panel\"><h1>Dashboard data is missing</h1><p>Run the dashboard exporter first.</p></main>";
+    return;
+  }
+
+  renderSummary();
+  renderSystemOptions();
+  renderSystemBars();
+  bindControls();
+  renderRows();
+})();

@@ -22,9 +22,12 @@ TrainingMode = Literal["quick", "standard", "production"]
 NON_NEGATIVE_TARGETS = {"target_clients", "target_stakes"}
 
 REGRESSOR_PARAMETER_CANDIDATES = [
-    {"depth": 5, "learning_rate": 0.05, "l2_leaf_reg": 5, "random_strength": 1.0, "bagging_temperature": 0.5},
-    {"depth": 6, "learning_rate": 0.04, "l2_leaf_reg": 6, "random_strength": 1.0, "bagging_temperature": 1.0},
-    {"depth": 7, "learning_rate": 0.03, "l2_leaf_reg": 8, "random_strength": 0.5, "bagging_temperature": 1.0},
+    {"_target_transform": "raw", "depth": 5, "learning_rate": 0.05, "l2_leaf_reg": 5, "random_strength": 1.0, "bagging_temperature": 0.5},
+    {"_target_transform": "raw", "depth": 6, "learning_rate": 0.04, "l2_leaf_reg": 6, "random_strength": 1.0, "bagging_temperature": 1.0},
+    {"_target_transform": "raw", "depth": 7, "learning_rate": 0.03, "l2_leaf_reg": 8, "random_strength": 0.5, "bagging_temperature": 1.0},
+    {"_target_transform": "log", "depth": 5, "learning_rate": 0.05, "l2_leaf_reg": 5, "random_strength": 1.0, "bagging_temperature": 0.5},
+    {"_target_transform": "log", "depth": 6, "learning_rate": 0.04, "l2_leaf_reg": 6, "random_strength": 1.0, "bagging_temperature": 1.0},
+    {"_target_transform": "log", "depth": 7, "learning_rate": 0.03, "l2_leaf_reg": 8, "random_strength": 0.5, "bagging_temperature": 1.0},
 ]
 
 CLASSIFIER_PARAMETER_CANDIDATES = [
@@ -107,24 +110,141 @@ def _score_regression_target(target: str, y_pred: np.ndarray) -> np.ndarray:
     return y_pred
 
 
+def _target_transform(params: dict[str, Any] | None, target: str) -> str:
+    transform = (params or {}).get("_target_transform", "raw")
+    return "log" if transform == "log" and target in NON_NEGATIVE_TARGETS else "raw"
+
+
+def _model_params(params: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in params.items() if not key.startswith("_")}
+
+
+def _target_for_fit(target: str, y: Iterable[float], transform: str = "raw") -> np.ndarray:
+    values = np.asarray(y, dtype="float64")
+    if transform == "log" and target in NON_NEGATIVE_TARGETS:
+        return np.log1p(np.maximum(values, 0))
+    return values
+
+
+def _prediction_from_fit(target: str, y_pred: Iterable[float], transform: str = "raw") -> np.ndarray:
+    values = np.asarray(y_pred, dtype="float64")
+    if transform == "log" and target in NON_NEGATIVE_TARGETS:
+        values = np.expm1(values)
+    return _score_regression_target(target, values)
+
+
 def _confidence_from_wape(wape: float) -> float:
     if pd.isna(wape):
         return np.nan
     return float(np.clip(1 - wape, 0, 1))
 
 
+def _absolute_percentage_error(actual: Iterable[float], predicted: Iterable[float]) -> pd.Series:
+    actual_series = pd.Series(actual, dtype="float64").reset_index(drop=True)
+    predicted_series = pd.Series(predicted, dtype="float64").reset_index(drop=True)
+    denominator = actual_series.abs().replace(0, np.nan)
+    error = (predicted_series - actual_series).abs() / denominator
+    return error.mask(denominator.isna(), predicted_series.ne(actual_series).astype(float))
+
+
+def build_confidence_table(actual: Iterable[float], predicted: Iterable[float], *, bins: int = 5) -> dict[str, Any]:
+    actual_series = pd.Series(actual, dtype="float64").reset_index(drop=True)
+    predicted_series = pd.Series(predicted, dtype="float64").reset_index(drop=True)
+    error = _absolute_percentage_error(actual_series, predicted_series)
+    valid = pd.DataFrame({"actual": actual_series, "predicted": predicted_series, "error": error}).dropna()
+    fallback = _confidence_from_wape(regression_metrics(actual_series, predicted_series)["WAPE"])
+    if valid.empty:
+        return {"fallback": fallback, "bins": []}
+
+    try:
+        groups = pd.qcut(valid["predicted"], q=min(bins, len(valid)), duplicates="drop")
+    except ValueError:
+        groups = None
+
+    rows: list[dict[str, float]] = []
+    if groups is not None:
+        for _, group in valid.groupby(groups, observed=True):
+            if group.empty:
+                continue
+            rows.append(
+                {
+                    "min_pred": float(group["predicted"].min()),
+                    "max_pred": float(group["predicted"].max()),
+                    "confidence": float(np.clip(1 - group["error"].median(), 0, 1)),
+                }
+            )
+
+    if not rows:
+        rows.append(
+            {
+                "min_pred": float(valid["predicted"].min()),
+                "max_pred": float(valid["predicted"].max()),
+                "confidence": fallback,
+            }
+        )
+
+    return {"fallback": fallback, "bins": rows}
+
+
+def confidence_from_prediction(
+    predicted: Iterable[float],
+    table: dict[str, Any] | None,
+    observation_coverage: Iterable[float] | None = None,
+) -> np.ndarray:
+    predicted_series = pd.Series(predicted, dtype="float64").reset_index(drop=True)
+    fallback = np.nan if not table else table.get("fallback", np.nan)
+    result = pd.Series(fallback, index=predicted_series.index, dtype="float64")
+    for row in (table or {}).get("bins", []):
+        lower = row.get("min_pred", -np.inf)
+        upper = row.get("max_pred", np.inf)
+        mask = predicted_series.between(lower, upper, inclusive="both")
+        result.loc[mask] = row.get("confidence", fallback)
+    if observation_coverage is not None:
+        coverage = pd.Series(observation_coverage, dtype="float64").reset_index(drop=True).clip(lower=0, upper=1)
+        result = result * coverage.fillna(1)
+    return result.clip(lower=0, upper=1).to_numpy()
+
+
+def _baseline_prediction(frame: pd.DataFrame, target: str) -> np.ndarray:
+    short = target.replace("target_", "")
+    week_2_column = f"{short}_week_2_sum"
+    week_1_column = f"{short}_week_1_sum"
+    if week_2_column in frame.columns and week_1_column in frame.columns:
+        week_1 = pd.to_numeric(frame[week_1_column], errors="coerce").fillna(0)
+        week_2 = pd.to_numeric(frame[week_2_column], errors="coerce").fillna(0)
+        growth = ((week_2 - week_1) / week_1.abs().replace(0, np.nan)).clip(lower=-0.5, upper=1.0).fillna(0)
+        return np.maximum((week_2 * (1 + growth)).to_numpy(dtype="float64"), 0)
+    if week_2_column in frame.columns:
+        return np.maximum(pd.to_numeric(frame[week_2_column], errors="coerce").fillna(0).to_numpy(), 0)
+    return np.zeros(len(frame), dtype="float64")
+
+
+def _best_blend_weight(actual: Iterable[float], model_prediction: np.ndarray, baseline_prediction: np.ndarray) -> float:
+    best_weight = 1.0
+    best_score = np.inf
+    for weight in np.linspace(0, 1, 11):
+        blended = weight * model_prediction + (1 - weight) * baseline_prediction
+        metrics = regression_metrics(actual, blended)
+        score = metrics["WAPE"] if pd.notna(metrics["WAPE"]) else metrics["MAE"]
+        if pd.notna(score) and score < best_score:
+            best_score = float(score)
+            best_weight = float(weight)
+    return best_weight
+
+
 def _build_regressor(params: dict[str, Any], settings: Settings, mode: TrainingMode | None = None) -> CatBoostRegressor:
     budget = _budget(settings, mode)
+    transform = params.get("_target_transform", "raw")
     return CatBoostRegressor(
-        loss_function="MAE",
-        eval_metric="MAE",
+        loss_function="RMSE" if transform == "log" else "MAE",
+        eval_metric="RMSE" if transform == "log" else "MAE",
         iterations=int(_setting(settings, "regressor_iterations", budget["regressor_iterations"])),
         random_seed=settings.random_seed,
         verbose=_fit_verbose(settings),
         allow_writing_files=False,
         od_type="Iter",
         thread_count=_thread_count(settings),
-        **params,
+        **_model_params(params),
     )
 
 
@@ -152,17 +272,21 @@ def _fit_regressor(
     categorical: list[str],
     settings: Settings,
     mode: TrainingMode | None = None,
+    transform: str = "raw",
 ) -> CatBoostRegressor:
     budget = _budget(settings, mode)
     fit_kwargs: dict[str, Any] = {"cat_features": categorical}
     if validation is not None and not validation.empty:
-        fit_kwargs["eval_set"] = (prepare_features(validation, categorical), validation[target])
+        fit_kwargs["eval_set"] = (
+            prepare_features(validation, categorical),
+            _target_for_fit(target, validation[target], transform),
+        )
         fit_kwargs["early_stopping_rounds"] = int(
             _setting(settings, "early_stopping_rounds", budget["early_stopping_rounds"])
         )
         fit_kwargs["use_best_model"] = True
 
-    model.fit(prepare_features(train, categorical), train[target], **fit_kwargs)
+    model.fit(prepare_features(train, categorical), _target_for_fit(target, train[target], transform), **fit_kwargs)
     return model
 
 
@@ -216,8 +340,13 @@ def tune_regressor(
                 continue
 
             model = _build_regressor(params, settings, mode)
-            _fit_regressor(model, train, validation, target, categorical, settings, mode)
-            prediction = _score_regression_target(target, model.predict(prepare_features(validation, categorical)))
+            transform = _target_transform(params, target)
+            _fit_regressor(model, train, validation, target, categorical, settings, mode, transform)
+            prediction = _prediction_from_fit(
+                target,
+                model.predict(prepare_features(validation, categorical)),
+                transform,
+            )
             metrics = regression_metrics(validation[target], prediction)
             selection_score = metrics["WAPE"] if pd.notna(metrics["WAPE"]) else metrics["MAE"]
             scores.append(float(selection_score))
@@ -426,9 +555,39 @@ def train_model_family(
                 validation = None
 
             model = _build_regressor(params, settings, mode)
-            _fit_regressor(model, train, validation, target, categorical, settings, mode)
-            prediction = _score_regression_target(target, model.predict(prepare_features(holdout_target, categorical)))
+            transform = _target_transform(params, target)
+            _fit_regressor(model, train, validation, target, categorical, settings, mode, transform)
+            model_prediction = _prediction_from_fit(
+                target,
+                model.predict(prepare_features(holdout_target, categorical)),
+                transform,
+            )
+            baseline = _baseline_prediction(holdout_target, target)
+            baseline_metrics = regression_metrics(holdout_target[target], baseline)
+            blend_weight = 1.0
+
+            if validation is not None and not validation.empty:
+                validation_prediction = _prediction_from_fit(
+                    target,
+                    model.predict(prepare_features(validation, categorical)),
+                    transform,
+                )
+                validation_baseline = _baseline_prediction(validation, target)
+                blend_weight = _best_blend_weight(validation[target], validation_prediction, validation_baseline)
+                validation_prediction = blend_weight * validation_prediction + (1 - blend_weight) * validation_baseline
+                confidence_table = build_confidence_table(validation[target], validation_prediction)
+            else:
+                confidence_table = {"fallback": np.nan, "bins": []}
+
+            prediction = blend_weight * model_prediction + (1 - blend_weight) * baseline
             metrics = regression_metrics(holdout_target[target], prediction)
+            if pd.isna(confidence_table.get("fallback")):
+                confidence_table["fallback"] = _confidence_from_wape(metrics["WAPE"])
+            confidence = confidence_from_prediction(
+                prediction,
+                confidence_table,
+                holdout_target.get("observation_coverage"),
+            )
 
             evaluations.append(
                 {
@@ -439,15 +598,25 @@ def train_model_family(
                     "Best_Iteration": model.get_best_iteration(),
                     **params,
                     **metrics,
+                    "Model_Blend_Weight": blend_weight,
+                    "Baseline_MAE": baseline_metrics["MAE"],
+                    "Baseline_RMSE": baseline_metrics["RMSE"],
+                    "Baseline_R2": baseline_metrics["R2"],
+                    "Baseline_WAPE": baseline_metrics["WAPE"],
+                    "WAPE_Improvement": baseline_metrics["WAPE"] - metrics["WAPE"],
                 }
             )
             bundle["regressors"][target] = model
             bundle["best_parameters"][target] = params
-            bundle["confidence_scores"][target] = _confidence_from_wape(metrics["WAPE"])
+            bundle.setdefault("target_transforms", {})[target] = transform
+            bundle.setdefault("blend_weights", {})[target] = blend_weight
+            bundle.setdefault("confidence_tables", {})[target] = confidence_table
+            bundle["confidence_scores"][target] = float(np.nanmean(confidence))
             short_name = target.replace("target_", "")
             predictions.loc[holdout_target.index, f"actual_{short_name}"] = holdout_target[target]
+            predictions.loc[holdout_target.index, f"baseline_{short_name}_week_4"] = baseline
             predictions.loc[holdout_target.index, f"predicted_{short_name}_week_4"] = prediction
-            predictions.loc[holdout_target.index, f"confidence_{short_name}"] = bundle["confidence_scores"][target]
+            predictions.loc[holdout_target.index, f"confidence_{short_name}"] = confidence
             week_3_column = f"actual_{short_name}_week_3"
             week_4_column = f"actual_{short_name}_week_4"
             if week_3_column in holdout_target.columns:

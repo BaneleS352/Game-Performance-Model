@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Week 4 Game Forecast Dashboard</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Week 4 forecast cockpit</p>
+        <h1>Choose where the team should focus next week.</h1>
+        <p class="lede">
+          A business view of predicted clients and stakes, model confidence, and where the current
+          forecast points to the largest opportunity.
+        </p>
+      </div>
+      <aside class="model-note" aria-label="Model timing">
+        <span>Model window</span>
+        <strong>Weeks 1-2 in, Week 4 out</strong>
+        <small id="asOfDate">Loading data</small>
+      </aside>
+    </header>
+
+    <main>
+      <section class="kpi-grid" aria-label="Decision summary">
+        <article class="kpi-card main">
+          <span>Predicted Week 4 stakes</span>
+          <strong id="totalStakes">-</strong>
+          <small>Projected value across all scored games</small>
+        </article>
+        <article class="kpi-card">
+          <span>Predicted Week 4 clients</span>
+          <strong id="totalClients">-</strong>
+          <small>Expected client demand</small>
+        </article>
+        <article class="kpi-card">
+          <span>Games ready for review</span>
+          <strong id="gamesScored">-</strong>
+          <small id="systemsScored">-</small>
+        </article>
+        <article class="kpi-card">
+          <span>Model confidence</span>
+          <strong id="confidenceBlend">-</strong>
+          <small>Clients and stakes combined</small>
+        </article>
+      </section>
+
+      <section class="insight-grid">
+        <article class="panel value-panel">
+          <div class="section-title">
+            <p class="eyebrow">Business value</p>
+            <h2>What this tells the team</h2>
+          </div>
+          <div class="value-steps">
+            <div>
+              <span class="step-mark">1</span>
+              <strong>Prioritize placement</strong>
+              <p>Put attention on games forecast to carry the largest stakes or client demand.</p>
+            </div>
+            <div>
+              <span class="step-mark">2</span>
+              <strong>Plan weekly capacity</strong>
+              <p>Use predicted clients as an early signal for operational load and promotion support.</p>
+            </div>
+            <div>
+              <span class="step-mark">3</span>
+              <strong>Review risk</strong>
+              <p>Use confidence and historical miss flags to separate clear opportunities from watch-list items.</p>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="section-title">
+            <p class="eyebrow">Model trust</p>
+            <h2>Back-test signal</h2>
+          </div>
+          <div class="trust-grid">
+            <div>
+              <span>Within 10%</span>
+              <strong id="within10">-</strong>
+            </div>
+            <div>
+              <span>Within 20%</span>
+              <strong id="within20">-</strong>
+            </div>
+            <div>
+              <span>Client closeness</span>
+              <strong id="clientProbability">-</strong>
+            </div>
+            <div>
+              <span>Stakes closeness</span>
+              <strong id="stakesProbability">-</strong>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="panel system-panel">
+        <div class="section-title row-title">
+          <div>
+            <p class="eyebrow">Where to focus</p>
+            <h2>Systems carrying predicted Week 4 value</h2>
+          </div>
+          <span class="quiet" id="systemCount">Top systems by stakes</span>
+        </div>
+        <div id="systemBars" class="system-bars" aria-live="polite"></div>
+      </section>
+
+      <section class="panel controls-panel">
+        <div class="section-title row-title">
+          <div>
+            <p class="eyebrow">Action queue</p>
+            <h2>Games to use in weekly decisions</h2>
+          </div>
+          <div class="tab-group" role="tablist" aria-label="Action queue views">
+            <button class="tab active" data-view="top_stakes" type="button">Top stakes</button>
+            <button class="tab" data-view="top_clients" type="button">Top clients</button>
+            <button class="tab" data-view="review_candidates" type="button">Review list</button>
+            <button class="tab" data-view="forecasts" type="button">All games</button>
+          </div>
+        </div>
+
+        <div class="toolbar">
+          <label>
+            <span>Search</span>
+            <input id="searchInput" type="search" placeholder="Game or system">
+          </label>
+          <label>
+            <span>System</span>
+            <select id="systemFilter">
+              <option value="">All systems</option>
+            </select>
+          </label>
+          <label>
+            <span>Sort by</span>
+            <select id="sortSelect">
+              <option value="predicted_stakes_week_4">Predicted stakes</option>
+              <option value="predicted_clients_week_4">Predicted clients</option>
+              <option value="confidence_stakes">Stakes confidence</option>
+              <option value="confidence_clients">Clients confidence</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Game</th>
+                <th>System</th>
+                <th>Predicted stakes</th>
+                <th>Stake confidence</th>
+                <th>Predicted clients</th>
+                <th>Client confidence</th>
+                <th>Signal</th>
+              </tr>
+            </thead>
+            <tbody id="gameRows"></tbody>
+          </table>
+        </div>
+        <p class="table-note" id="rowCount">Loading games</p>
+      </section>
+    </main>
+
+    <script src="dashboard_data.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
