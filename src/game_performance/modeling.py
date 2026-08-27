@@ -19,7 +19,7 @@ from .validation import (
 
 TrainingMode = Literal["quick", "standard", "production"]
 
-NON_NEGATIVE_TARGETS = {"target_clients", "target_betcount", "target_stakes"}
+NON_NEGATIVE_TARGETS = {"target_clients", "target_stakes"}
 
 REGRESSOR_PARAMETER_CANDIDATES = [
     {"depth": 5, "learning_rate": 0.05, "l2_leaf_reg": 5, "random_strength": 1.0, "bagging_temperature": 0.5},
@@ -105,6 +105,12 @@ def _score_regression_target(target: str, y_pred: np.ndarray) -> np.ndarray:
     if target in NON_NEGATIVE_TARGETS:
         return np.maximum(y_pred, 0)
     return y_pred
+
+
+def _confidence_from_wape(wape: float) -> float:
+    if pd.isna(wape):
+        return np.nan
+    return float(np.clip(1 - wape, 0, 1))
 
 
 def _build_regressor(params: dict[str, Any], settings: Settings, mode: TrainingMode | None = None) -> CatBoostRegressor:
@@ -318,13 +324,14 @@ def tune_shared_hyperparameters(
     settings: Settings,
     *,
     run_regression: bool = True,
-    run_classification: bool = True,
+    run_classification: bool = False,
     targets: Iterable[str] | None = None,
     mode: TrainingMode | None = None,
 ) -> tuple[dict[str, Any], pd.DataFrame, int, int]:
     (checkpoint, horizon), snapshot = choose_representative_snapshot(snapshots, settings)
     development, holdout, _ = split_development_and_holdout(snapshot, settings.final_test_fraction)
-    development, _, _ = create_high_performance_target(development, holdout, settings.high_performer_percentile)
+    if run_classification:
+        development, _, _ = create_high_performance_target(development, holdout, settings.high_performer_percentile)
     categorical = categorical_features(snapshot)
 
     selected_targets = list(targets or REGRESSION_TARGETS)
@@ -355,8 +362,6 @@ def _base_prediction_frame(holdout: pd.DataFrame) -> pd.DataFrame:
         "First_Observed_Date",
         "Obs_Window",
         "Horizon",
-        "future_performance_score",
-        "is_high_performer",
     ]
     return holdout[[column for column in columns if column in holdout.columns]].copy()
 
@@ -371,16 +376,18 @@ def train_model_family(
     settings: Settings,
     *,
     run_regression: bool = True,
-    run_classification: bool = True,
+    run_classification: bool = False,
     targets: Iterable[str] | None = None,
     mode: TrainingMode | None = None,
 ) -> tuple[dict[str, Any], pd.DataFrame, dict[str, Any], pd.DataFrame]:
     development, holdout, holdout_start = split_development_and_holdout(snapshot, settings.final_test_fraction)
-    development, holdout, threshold = create_high_performance_target(
-        development,
-        holdout,
-        settings.high_performer_percentile,
-    )
+    threshold = np.nan
+    if run_classification:
+        development, holdout, threshold = create_high_performance_target(
+            development,
+            holdout,
+            settings.high_performer_percentile,
+        )
     categorical = categorical_features(snapshot)
     selected_targets = list(targets or REGRESSION_TARGETS)
 
@@ -391,6 +398,7 @@ def train_model_family(
         "regressors": {},
         "classifier": None,
         "best_parameters": {},
+        "confidence_scores": {},
         "high_score_threshold": threshold,
         "holdout_start_date": holdout_start,
         "tuned_on_checkpoint": tuning_checkpoint,
@@ -420,6 +428,7 @@ def train_model_family(
             model = _build_regressor(params, settings, mode)
             _fit_regressor(model, train, validation, target, categorical, settings, mode)
             prediction = _score_regression_target(target, model.predict(prepare_features(holdout_target, categorical)))
+            metrics = regression_metrics(holdout_target[target], prediction)
 
             evaluations.append(
                 {
@@ -429,14 +438,28 @@ def train_model_family(
                     "Holdout_Start": holdout_start,
                     "Best_Iteration": model.get_best_iteration(),
                     **params,
-                    **regression_metrics(holdout_target[target], prediction),
+                    **metrics,
                 }
             )
             bundle["regressors"][target] = model
             bundle["best_parameters"][target] = params
+            bundle["confidence_scores"][target] = _confidence_from_wape(metrics["WAPE"])
             short_name = target.replace("target_", "")
             predictions.loc[holdout_target.index, f"actual_{short_name}"] = holdout_target[target]
-            predictions.loc[holdout_target.index, f"predicted_{short_name}"] = prediction
+            predictions.loc[holdout_target.index, f"predicted_{short_name}_week_4"] = prediction
+            predictions.loc[holdout_target.index, f"confidence_{short_name}"] = bundle["confidence_scores"][target]
+            week_3_column = f"actual_{short_name}_week_3"
+            week_4_column = f"actual_{short_name}_week_4"
+            if week_3_column in holdout_target.columns:
+                predictions.loc[holdout_target.index, week_3_column] = holdout_target[week_3_column]
+            if week_4_column in holdout_target.columns:
+                predictions.loc[holdout_target.index, week_4_column] = holdout_target[week_4_column]
+            for week in (1, 2):
+                week_column = f"{target}_week_{week}"
+                if week_column in holdout_target.columns:
+                    predictions.loc[holdout_target.index, f"actual_{short_name}_week_{week}"] = holdout_target[
+                        week_column
+                    ]
 
     class_eval: dict[str, Any] = {}
     params = shared_parameters.get("classifier")
@@ -478,7 +501,7 @@ def train_all_model_families(
     settings: Settings,
     *,
     run_regression: bool = True,
-    run_classification: bool = True,
+    run_classification: bool = False,
     targets: Iterable[str] | None = None,
     mode: TrainingMode | None = None,
     max_families: int | None = None,

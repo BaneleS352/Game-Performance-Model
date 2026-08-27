@@ -5,13 +5,9 @@ from game_performance.validation import create_high_performance_target
 
 def _frame(ggr_values, missing_ggr_pct=None):
     n = len(ggr_values)
-    ggr_pct = [0.1] * n if missing_ggr_pct is None else missing_ggr_pct
     return pd.DataFrame({
-        "target_ggr": ggr_values,
         "target_stakes": [100.0] * n,
         "target_clients": [10.0] * n,
-        "target_betcount": [20.0] * n,
-        "target_ggr_pct": ggr_pct,
     })
 
 

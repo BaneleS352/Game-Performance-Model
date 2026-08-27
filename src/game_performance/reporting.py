@@ -3,12 +3,15 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from .features import OBSERVATION_WINDOW_DAYS, PREDICTION_WEEK_END
 from .validation import create_high_performance_target, split_development_and_holdout
 
 
-def _period_columns(frame: pd.DataFrame, checkpoint: int, horizon: int) -> pd.DataFrame:
+def _period_columns(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy()
     first = pd.to_datetime(result["First_Observed_Date"], errors="coerce")
+    checkpoint = pd.to_numeric(result.get("Obs_Window", OBSERVATION_WINDOW_DAYS), errors="coerce")
+    horizon = pd.to_numeric(result.get("Horizon", PREDICTION_WEEK_END - OBSERVATION_WINDOW_DAYS), errors="coerce")
     result["Observation_Start"] = first
     result["Observation_End"] = first + pd.to_timedelta(checkpoint - 1, unit="D")
     result["Prediction_Start"] = first + pd.to_timedelta(checkpoint, unit="D")
@@ -20,32 +23,80 @@ def _prediction_probability(actual: pd.Series, predicted: pd.Series) -> pd.Serie
     denominator = actual.abs().replace(0, np.nan)
     probability = 1 - (predicted - actual).abs() / denominator
     probability = probability.clip(lower=0, upper=1)
-    return probability.mask(denominator.isna(), np.where(predicted.eq(actual), 1.0, 0.0))
+    return probability.mask(denominator.isna(), predicted.eq(actual).astype(float))
+
+
+def _growth_percentage(week_1: pd.Series, week_2: pd.Series) -> pd.Series:
+    denominator = week_1.abs().replace(0, np.nan)
+    return ((week_2 - week_1) / denominator).mask(denominator.isna())
+
+
+def _is_off_by(actual: pd.Series, predicted: pd.Series, threshold: float) -> pd.Series:
+    denominator = actual.abs().replace(0, np.nan)
+    error = (predicted - actual).abs() / denominator
+    return error.gt(threshold).fillna(False).astype("int8")
+
+
+def add_actual_week_columns(holdout_predictions: pd.DataFrame, daily_data: pd.DataFrame) -> pd.DataFrame:
+    """Add first- and second-week actual clients/stakes from the daily source data."""
+    if holdout_predictions.empty:
+        return holdout_predictions.copy()
+
+    required = {"Game_ID", "Days_Since_First_Observed", "Clients", "Stakes"}
+    missing = required.difference(daily_data.columns)
+    if missing:
+        raise KeyError(f"Missing required daily data columns: {sorted(missing)}")
+
+    result = holdout_predictions.copy()
+    pairs = result[["Game_ID", "Obs_Window"]].drop_duplicates().copy()
+    lookup = daily_data[list(required)].merge(pairs, on="Game_ID", how="inner")
+    lookup["Days_Since_First_Observed"] = pd.to_numeric(
+        lookup["Days_Since_First_Observed"],
+        errors="coerce",
+    )
+    lookup["Obs_Window"] = pd.to_numeric(lookup["Obs_Window"], errors="coerce")
+    lookup["future_day"] = lookup["Days_Since_First_Observed"] - lookup["Obs_Window"]
+
+    for metric, source in (("clients", "Clients"), ("stakes", "Stakes")):
+        week_1 = (
+            lookup[lookup["future_day"].between(1, 7)]
+            .groupby(["Game_ID", "Obs_Window"], as_index=False)[source]
+            .sum(min_count=1)
+            .rename(columns={source: f"actual_{metric}_week_1"})
+        )
+        week_2 = (
+            lookup[lookup["future_day"].between(8, 14)]
+            .groupby(["Game_ID", "Obs_Window"], as_index=False)[source]
+            .sum(min_count=1)
+            .rename(columns={source: f"actual_{metric}_week_2"})
+        )
+        result = result.merge(week_1, on=["Game_ID", "Obs_Window"], how="left")
+        result = result.merge(week_2, on=["Game_ID", "Obs_Window"], how="left")
+
+    return result
 
 
 def build_holdout_comparison(
     holdout_predictions: pd.DataFrame,
-    checkpoint: int = 14,
-    horizon: int = 7,
+    checkpoint: int | None = None,
+    horizon: int | None = None,
 ) -> pd.DataFrame:
     """Create a business-friendly holdout comparison report."""
 
-    test = holdout_predictions[
-        (holdout_predictions["Obs_Window"] == checkpoint)
-        & (holdout_predictions["Horizon"] == horizon)
-    ].copy()
+    test = holdout_predictions.copy()
+    if checkpoint is not None:
+        test = test[test["Obs_Window"] == checkpoint]
+    if horizon is not None:
+        test = test[test["Horizon"] == horizon]
 
     if test.empty:
         return test
 
-    test = _period_columns(test, checkpoint, horizon)
+    test = _period_columns(test)
 
     metrics = [
         "clients",
-        "betcount",
         "stakes",
-        "ggr",
-        "ggr_pct",
     ]
 
     # ------------------------------------------------------------------
@@ -53,8 +104,8 @@ def build_holdout_comparison(
     # ------------------------------------------------------------------
     for metric in metrics:
 
-        actual = f"actual_{metric}"
-        predicted = f"predicted_{metric}"
+        actual = f"actual_{metric}_week_4"
+        predicted = f"predicted_{metric}_week_4"
 
         if {actual, predicted}.issubset(test.columns):
 
@@ -62,6 +113,22 @@ def build_holdout_comparison(
 
             test[f"variance_{metric}"] = variance
             test[f"probability_{metric}"] = _prediction_probability(test[actual], test[predicted])
+            week_3 = f"actual_{metric}_week_3"
+            week_4 = f"actual_{metric}_week_4"
+            if {week_3, week_4}.issubset(test.columns):
+                test[f"week_3_to_week_4_{metric}_growth_pct"] = _growth_percentage(test[week_3], test[week_4])
+
+    off_10 = []
+    off_20 = []
+    for metric in metrics:
+        actual = f"actual_{metric}_week_4"
+        predicted = f"predicted_{metric}_week_4"
+        if {actual, predicted}.issubset(test.columns):
+            off_10.append(_is_off_by(test[actual], test[predicted], 0.10))
+            off_20.append(_is_off_by(test[actual], test[predicted], 0.20))
+    if off_10:
+        test["off_by_10_pct"] = pd.concat(off_10, axis=1).max(axis=1)
+        test["off_by_20_pct"] = pd.concat(off_20, axis=1).max(axis=1)
 
     # ------------------------------------------------------------------
     # Business-friendly column ordering
@@ -81,14 +148,9 @@ def build_holdout_comparison(
         "Prediction_End",
         "Obs_Window",
         "Horizon",
+        "off_by_10_pct",
+        "off_by_20_pct",
 
-        # ==============================================================
-        # Classification
-        # ==============================================================
-        "future_performance_score",
-        "is_high_performer",
-        "probability_high_performance",
-        "predicted_high_performer",
     ]
 
     # ==============================================================
@@ -98,8 +160,11 @@ def build_holdout_comparison(
 
         ordered_columns.extend(
             [
-                f"actual_{metric}",
-                f"predicted_{metric}",
+                f"actual_{metric}_week_3",
+                f"actual_{metric}_week_4",
+                f"week_3_to_week_4_{metric}_growth_pct",
+                f"predicted_{metric}_week_4",
+                f"confidence_{metric}",
                 f"variance_{metric}",
                 f"probability_{metric}",
             ]
@@ -114,16 +179,7 @@ def build_holdout_comparison(
         if col in test.columns
     ]
 
-    # Preserve any remaining columns
-    remaining_columns = [
-        col
-        for col in test.columns
-        if col not in ordered_columns
-    ]
-
-    return test[
-        ordered_columns + remaining_columns
-    ]
+    return test[ordered_columns]
 
 
 def build_training_view(
@@ -172,44 +228,32 @@ def _high_performers(comparison: pd.DataFrame) -> pd.DataFrame:
 
 
 def _forecast_export_columns(forecasts: pd.DataFrame) -> pd.DataFrame:
-    return forecasts.drop(columns=["recommendation", "Best_Iteration"], errors="ignore")
+    allowed = [
+        "Game_ID",
+        "TournamentName",
+        "SystemName",
+        "First_Observed_Date",
+        "Lifecycle_Stage",
+        "Obs_Window",
+        "Horizon",
+        "active_observation_days",
+        "observation_coverage",
+        "predicted_clients_week_4",
+        "confidence_clients",
+        "predicted_stakes_week_4",
+        "confidence_stakes",
+        "Checkpoint",
+        "As_Of_Date",
+        "scored_at",
+    ]
+    return forecasts[[column for column in allowed if column in forecasts.columns]].copy()
 
 
-def _score_calculation_sheet() -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            {
-                "Metric": "Future GGR",
-                "Target field": "target_ggr",
-                "Weight": 0.40,
-                "Calculation note": "Empirical percentile within the development dataset.",
-            },
-            {
-                "Metric": "Future Stakes",
-                "Target field": "target_stakes",
-                "Weight": 0.25,
-                "Calculation note": "Empirical percentile within the development dataset.",
-            },
-            {
-                "Metric": "Future Clients",
-                "Target field": "target_clients",
-                "Weight": 0.15,
-                "Calculation note": "Empirical percentile within the development dataset.",
-            },
-            {
-                "Metric": "Future Bet Count",
-                "Target field": "target_betcount",
-                "Weight": 0.10,
-                "Calculation note": "Empirical percentile within the development dataset.",
-            },
-            {
-                "Metric": "Future GGR %",
-                "Target field": "target_ggr_pct",
-                "Weight": 0.10,
-                "Calculation note": "Empirical percentile within the development dataset.",
-            },
-        ]
-    )
+def _model_accuracy(regression: pd.DataFrame) -> pd.DataFrame:
+    if regression.empty or "Target" not in regression.columns:
+        return regression.iloc[0:0].copy()
+    keep_targets = {"target_clients", "target_stakes"}
+    return regression[regression["Target"].isin(keep_targets)].copy()
 
 
 def export_excel(
@@ -225,9 +269,8 @@ def export_excel(
 
     sheets = [
         ("Holdout Comparison", comparison),
-        ("High Performers", _high_performers(comparison)),
         ("Forecasts", _forecast_export_columns(forecasts)),
-        ("future_performance_score_calculator", _score_calculation_sheet()),
+        ("Model Accuracy", _model_accuracy(regression)),
     ]
 
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
@@ -247,26 +290,6 @@ def export_excel(
 
             # Freeze header
             ws.freeze_panes = "A2"
-
-            if name == "future_performance_score_calculator":
-                ws["F1"] = "Formula"
-                ws["F2"] = (
-                    "future_performance_score = 40% * percentile(Future GGR) "
-                    "+ 25% * percentile(Future Stakes) "
-                    "+ 15% * percentile(Future Clients) "
-                    "+ 10% * percentile(Future Bet Count) "
-                    "+ 10% * percentile(Future GGR %)"
-                )
-                ws["F4"] = "High performer flag"
-                ws["F5"] = (
-                    "Marked high performer when future_performance_score is at or above "
-                    "the 80th percentile threshold from the development scored dataset."
-                )
-                ws["C2"].number_format = "0%"
-                ws["C3"].number_format = "0%"
-                ws["C4"].number_format = "0%"
-                ws["C5"].number_format = "0%"
-                ws["C6"].number_format = "0%"
 
             # Auto-size columns
             for column_cells in ws.columns:

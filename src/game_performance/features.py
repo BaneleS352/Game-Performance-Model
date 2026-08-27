@@ -10,9 +10,12 @@ OPTIONAL_METADATA_CANDIDATES = [
     "Theme", "Volatility", "RTP", "Market", "Country", "Brand", "DeviceType",
 ]
 
-REGRESSION_TARGETS = [
-    "target_clients", "target_betcount", "target_stakes", "target_ggr", "target_ggr_pct"
-]
+REGRESSION_TARGETS = ["target_clients", "target_stakes"]
+OBSERVATION_WINDOW_DAYS = 14
+VALIDATION_WEEK_START = 15
+VALIDATION_WEEK_END = 21
+PREDICTION_WEEK_START = 22
+PREDICTION_WEEK_END = 28
 
 BASE_CATEGORICAL_FEATURES = ["SystemName", "TournamentName", "Launch_Month", "Launch_Weekday"]
 BASE_NUMERIC_FEATURES = [
@@ -165,15 +168,57 @@ def build_lifecycle_snapshot(
 
         if require_future:
             # Future rows are targets only; no future-derived column is used as a feature.
+            week_1 = game[game["Days_Since_First_Observed"].between(obs_window + 1, obs_window + 7)].copy()
+            week_2 = game[game["Days_Since_First_Observed"].between(obs_window + 8, obs_window + 14)].copy()
             row["target_clients"] = future["Clients"].sum(min_count=1)
-            row["target_betcount"] = future["Betcount"].sum(min_count=1)
             row["target_stakes"] = future["Stakes"].sum(min_count=1)
-            row["target_ggr"] = future["GGR"].sum(min_count=1)
-            row["target_ggr_pct"] = _safe_divide(row["target_ggr"], row["target_stakes"])
+            row["target_clients_week_1"] = week_1["Clients"].sum(min_count=1)
+            row["target_clients_week_2"] = week_2["Clients"].sum(min_count=1)
+            row["target_stakes_week_1"] = week_1["Stakes"].sum(min_count=1)
+            row["target_stakes_week_2"] = week_2["Stakes"].sum(min_count=1)
 
         rows.append(row)
 
     return pd.DataFrame(rows).replace([np.inf, -np.inf], np.nan)
+
+
+def build_four_week_snapshot(
+    data: pd.DataFrame,
+    *,
+    require_future: bool = True,
+) -> pd.DataFrame:
+    """Build one fixed 4-week row per game.
+
+    Weeks 1-2 (days 1-14) are features. Week 3 is validation context.
+    Week 4 is the prediction target when future data is required.
+    """
+    snapshot = build_lifecycle_snapshot(
+        data,
+        OBSERVATION_WINDOW_DAYS,
+        PREDICTION_WEEK_END - OBSERVATION_WINDOW_DAYS,
+        require_future=require_future,
+    )
+    if snapshot.empty:
+        return snapshot
+
+    snapshot["Lifecycle_Stage"] = "Week 2"
+    snapshot["Prediction_Week"] = 4
+
+    if require_future:
+        actuals = data[data["Game_ID"].isin(snapshot["Game_ID"])].copy()
+        actuals["week_number"] = ((actuals["Days_Since_First_Observed"] - 1) // 7 + 1).astype("int64")
+        weekly = (
+            actuals[actuals["week_number"].isin([3, 4])]
+            .groupby(["Game_ID", "week_number"], as_index=False)
+            .agg({"Clients": "sum", "Stakes": "sum"})
+        )
+        for metric, prefix in (("Clients", "clients"), ("Stakes", "stakes")):
+            wide = weekly.pivot(index="Game_ID", columns="week_number", values=metric)
+            snapshot[f"actual_{prefix}_week_3"] = snapshot["Game_ID"].map(wide.get(3))
+            snapshot[f"actual_{prefix}_week_4"] = snapshot["Game_ID"].map(wide.get(4))
+            snapshot[f"target_{prefix}"] = snapshot[f"actual_{prefix}_week_4"]
+
+    return snapshot.replace([np.inf, -np.inf], np.nan)
 
 
 def prepare_features(frame: pd.DataFrame, categorical: list[str] | None = None) -> pd.DataFrame:
@@ -192,7 +237,8 @@ def prepare_features(frame: pd.DataFrame, categorical: list[str] | None = None) 
 
 def build_all_historical_snapshots(data: pd.DataFrame, strategy: dict[int, list[int]]) -> dict[tuple[int, int], pd.DataFrame]:
     return {
-        (checkpoint, horizon): build_lifecycle_snapshot(data, checkpoint, horizon, require_future=True)
-        for checkpoint, horizons in strategy.items()
-        for horizon in horizons
+        (OBSERVATION_WINDOW_DAYS, PREDICTION_WEEK_END - OBSERVATION_WINDOW_DAYS): build_four_week_snapshot(
+            data,
+            require_future=True,
+        )
     }

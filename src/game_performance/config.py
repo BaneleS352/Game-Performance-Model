@@ -16,12 +16,10 @@ class Settings:
     min_training_rows: int = 100
     min_validation_rows: int = 25
     representative_tuning_checkpoint: int = 14
-    representative_tuning_horizon: int = 30
+    representative_tuning_horizon: int = 14
 
     horizon_strategy: dict[int, list[int]] = field(default_factory=lambda: {
-        7: [7, 14, 30],
-        14: [7, 14, 30, 60],
-        21: [14, 30, 60],
+        14: [14],
     })
 
     def __post_init__(self) -> None:
