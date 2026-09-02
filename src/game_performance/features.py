@@ -22,26 +22,36 @@ BASE_CATEGORICAL_FEATURES = [
     "TournamentName",
     "Launch_Month",
     "Launch_Weekday",
+    "Observation_End_Month",
+    "Observation_End_Weekday",
     "Clients_Size_Band",
     "Stakes_Size_Band",
 ]
 BASE_NUMERIC_FEATURES = [
     "Obs_Window", "Horizon",
-    "obs_clients_sum", "obs_betcount_sum", "obs_stakes_sum", "obs_ggr_sum", "obs_ggr_pct",
+    "Observation_End_DayOfMonth", "Observation_End_WeekOfYear",
+    "obs_clients_sum", "obs_stakes_sum",
     "clients_week_1_sum", "clients_week_2_sum", "clients_week_1_to_2_growth",
     "stakes_week_1_sum", "stakes_week_2_sum", "stakes_week_1_to_2_growth",
     "stake_per_client_week_1", "stake_per_client_week_2",
     "log_obs_clients_sum", "log_obs_stakes_sum", "log_clients_week_2_sum", "log_stakes_week_2_sum",
-    "obs_clients_mean", "obs_betcount_mean", "obs_stakes_mean", "obs_ggr_mean",
-    "obs_clients_std", "obs_betcount_std", "obs_stakes_std", "obs_ggr_std",
-    "bets_per_client", "stake_per_client", "ggr_per_client",
-    "clients_slope", "betcount_slope", "stakes_slope", "ggr_slope",
-    "clients_growth", "betcount_growth", "stakes_growth", "ggr_growth",
-    "clients_last_3_mean", "betcount_last_3_mean", "stakes_last_3_mean", "ggr_last_3_mean",
-    "clients_last_7_mean", "betcount_last_7_mean", "stakes_last_7_mean", "ggr_last_7_mean",
-    "clients_recent_share", "betcount_recent_share", "stakes_recent_share", "ggr_recent_share",
-    "clients_peak", "betcount_peak", "stakes_peak", "ggr_peak",
-    "days_since_clients_peak", "days_since_betcount_peak", "days_since_stakes_peak", "days_since_ggr_peak",
+    "obs_clients_mean", "obs_stakes_mean",
+    "obs_clients_std", "obs_stakes_std",
+    "clients_first", "stakes_first",
+    "clients_last", "stakes_last",
+    "clients_median", "stakes_median",
+    "clients_cv", "stakes_cv",
+    "stake_per_client",
+    "clients_slope", "stakes_slope",
+    "clients_growth", "stakes_growth",
+    "clients_last_3_mean", "stakes_last_3_mean",
+    "clients_last_7_mean", "stakes_last_7_mean",
+    "clients_recent_to_early_ratio", "stakes_recent_to_early_ratio",
+    "clients_recent_share", "stakes_recent_share",
+    "clients_peak", "stakes_peak",
+    "days_since_clients_peak", "days_since_stakes_peak",
+    "clients_zero_days", "stakes_zero_days",
+    "clients_positive_days", "stakes_positive_days",
     "active_observation_days", "observation_coverage",
 ]
 
@@ -111,6 +121,25 @@ def _recent_mean(values: Iterable[float], window: int) -> float:
     return np.nan if series.notna().sum() == 0 else float(series.tail(window).mean())
 
 
+def _recent_to_early_ratio(values: Iterable[float], window: int = 3) -> float:
+    series = pd.Series(values, dtype="float64").dropna()
+    if len(series) < 2:
+        return np.nan
+    early = series.head(min(window, len(series))).mean()
+    recent = series.tail(min(window, len(series))).mean()
+    return _safe_divide(recent, abs(early))
+
+
+def _coefficient_of_variation(values: Iterable[float]) -> float:
+    series = pd.Series(values, dtype="float64").dropna()
+    if series.empty:
+        return np.nan
+    mean = series.mean()
+    if pd.isna(mean) or mean == 0:
+        return np.nan
+    return float(series.std(ddof=0) / abs(mean))
+
+
 def _days_since_peak(values: Iterable[float]) -> float:
     series = pd.Series(values, dtype="float64").reset_index(drop=True)
     if series.notna().sum() == 0:
@@ -129,7 +158,7 @@ def build_lifecycle_snapshot(
     """Build one point-in-time row per game for a checkpoint/horizon pair."""
     required = {
         "Game_ID", "Date", "Days_Since_First_Observed", "First_Observed_Date",
-        "SystemName", "TournamentName", "Clients", "Betcount", "Stakes", "GGR",
+        "SystemName", "TournamentName", "Clients", "Stakes",
     }
     missing = required.difference(data.columns)
     if missing:
@@ -153,11 +182,12 @@ def build_lifecycle_snapshot(
 
         daily_obs = (
             obs.groupby("Date", as_index=False)
-            .agg({"Clients": "sum", "Betcount": "sum", "Stakes": "sum", "GGR": "sum"})
+            .agg({"Clients": "sum", "Stakes": "sum"})
             .sort_values("Date")
             .reset_index(drop=True)
         )
         first_observed = pd.to_datetime(game["First_Observed_Date"].iloc[0])
+        observation_end = first_observed + pd.to_timedelta(obs_window - 1, unit="D")
         row: dict[str, object] = {
             "Game_ID": game_id,
             "SystemName": obs["SystemName"].iloc[0],
@@ -165,6 +195,12 @@ def build_lifecycle_snapshot(
             "First_Observed_Date": first_observed,
             "Launch_Month": first_observed.strftime("%B") if pd.notna(first_observed) else "Unknown",
             "Launch_Weekday": first_observed.strftime("%A") if pd.notna(first_observed) else "Unknown",
+            "Observation_End_Month": observation_end.strftime("%B") if pd.notna(observation_end) else "Unknown",
+            "Observation_End_Weekday": observation_end.strftime("%A") if pd.notna(observation_end) else "Unknown",
+            "Observation_End_DayOfMonth": observation_end.day if pd.notna(observation_end) else np.nan,
+            "Observation_End_WeekOfYear": (
+                int(observation_end.isocalendar().week) if pd.notna(observation_end) else np.nan
+            ),
             "Obs_Window": obs_window,
             "Horizon": horizon,
             "Lifecycle_Stage": f"Day {obs_window}",
@@ -176,24 +212,28 @@ def build_lifecycle_snapshot(
             non_missing = obs[column].dropna()
             row[column] = non_missing.iloc[0] if not non_missing.empty else "Unknown"
 
-        for source, prefix in (("Clients", "clients"), ("Betcount", "betcount"), ("Stakes", "stakes"), ("GGR", "ggr")):
+        for source, prefix in (("Clients", "clients"), ("Stakes", "stakes")):
             series = daily_obs[source]
             total = series.sum(min_count=1)
             row[f"obs_{prefix}_sum"] = total
             row[f"obs_{prefix}_mean"] = series.mean()
             row[f"obs_{prefix}_std"] = series.std(ddof=0)
+            row[f"{prefix}_first"] = series.iloc[0] if not series.empty else np.nan
+            row[f"{prefix}_last"] = series.iloc[-1] if not series.empty else np.nan
+            row[f"{prefix}_median"] = series.median()
+            row[f"{prefix}_cv"] = _coefficient_of_variation(series)
             row[f"{prefix}_slope"] = _linear_slope(series)
             row[f"{prefix}_growth"] = _first_last_growth(series)
             row[f"{prefix}_last_3_mean"] = _recent_mean(series, 3)
             row[f"{prefix}_last_7_mean"] = _recent_mean(series, 7)
+            row[f"{prefix}_recent_to_early_ratio"] = _recent_to_early_ratio(series, 3)
             row[f"{prefix}_recent_share"] = _safe_divide(series.tail(3).sum(min_count=1), total)
             row[f"{prefix}_peak"] = series.max()
             row[f"days_since_{prefix}_peak"] = _days_since_peak(series)
+            row[f"{prefix}_zero_days"] = int(series.fillna(0).eq(0).sum())
+            row[f"{prefix}_positive_days"] = int(series.gt(0).sum())
 
-        row["obs_ggr_pct"] = _safe_divide(row["obs_ggr_sum"], row["obs_stakes_sum"])
-        row["bets_per_client"] = _safe_divide(row["obs_betcount_sum"], row["obs_clients_sum"])
         row["stake_per_client"] = _safe_divide(row["obs_stakes_sum"], row["obs_clients_sum"])
-        row["ggr_per_client"] = _safe_divide(row["obs_ggr_sum"], row["obs_clients_sum"])
 
         week_1_obs = obs[obs["Days_Since_First_Observed"].between(1, 7)]
         week_2_obs = obs[obs["Days_Since_First_Observed"].between(8, obs_window)]

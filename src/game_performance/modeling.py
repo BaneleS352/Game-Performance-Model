@@ -6,7 +6,16 @@ from typing import Any, Iterable, Literal
 import numpy as np
 import pandas as pd
 from catboost import CatBoostClassifier, CatBoostRegressor
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.isotonic import IsotonicRegression
+from sklearn.metrics import (
+    accuracy_score,
+    brier_score_loss,
+    f1_score,
+    log_loss,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 
 from .config import Settings
 from .features import REGRESSION_TARGETS, categorical_features, prepare_features
@@ -20,6 +29,7 @@ from .validation import (
 TrainingMode = Literal["quick", "standard", "production"]
 
 NON_NEGATIVE_TARGETS = {"target_clients", "target_stakes"}
+ProbabilityCalibrator = dict[str, Any]
 
 REGRESSOR_PARAMETER_CANDIDATES = [
     {"_target_transform": "raw", "depth": 5, "learning_rate": 0.05, "l2_leaf_reg": 5, "random_strength": 1.0, "bagging_temperature": 0.5},
@@ -104,15 +114,137 @@ def _safe_roc_auc(y_true: pd.Series, probability: np.ndarray) -> float:
     return float(roc_auc_score(y_true, probability)) if y_true.nunique(dropna=True) == 2 else np.nan
 
 
+def _safe_log_loss(y_true: pd.Series | np.ndarray, probability: np.ndarray) -> float:
+    if len(y_true) == 0:
+        return np.nan
+    return float(log_loss(y_true, np.clip(probability, 1e-6, 1 - 1e-6), labels=[0, 1]))
+
+
+def _expected_calibration_error(
+    y_true: pd.Series | np.ndarray,
+    probability: np.ndarray,
+    *,
+    n_bins: int = 10,
+) -> float:
+    if len(y_true) == 0:
+        return np.nan
+
+    frame = pd.DataFrame(
+        {
+            "actual": np.asarray(y_true, dtype=float),
+            "probability": np.clip(np.asarray(probability, dtype=float), 0, 1),
+        }
+    ).dropna()
+    if frame.empty:
+        return np.nan
+
+    bins = np.linspace(0, 1, n_bins + 1)
+    bin_ids = np.digitize(frame["probability"], bins[1:-1], right=False)
+    total = len(frame)
+    error = 0.0
+
+    for bin_id in range(n_bins):
+        bucket = frame[bin_ids == bin_id]
+        if bucket.empty:
+            continue
+        error += len(bucket) / total * abs(bucket["probability"].mean() - bucket["actual"].mean())
+
+    return float(error)
+
+
+def probability_calibration_bins(
+    y_true: pd.Series | np.ndarray,
+    probability: np.ndarray,
+    *,
+    raw_probability: np.ndarray | None = None,
+    n_bins: int = 10,
+) -> pd.DataFrame:
+    """Summarise how predicted probabilities line up with actual hit rates."""
+    frame = pd.DataFrame(
+        {
+            "actual": np.asarray(y_true, dtype=float),
+            "probability": np.clip(np.asarray(probability, dtype=float), 0, 1),
+        }
+    )
+    if raw_probability is not None:
+        frame["raw_probability"] = np.clip(np.asarray(raw_probability, dtype=float), 0, 1)
+    frame = frame.dropna(subset=["actual", "probability"])
+
+    bins = np.linspace(0, 1, n_bins + 1)
+    rows: list[dict[str, Any]] = []
+    if frame.empty:
+        frame["_bin"] = pd.Series(dtype=int)
+    else:
+        frame["_bin"] = np.digitize(frame["probability"], bins[1:-1], right=False)
+
+    for bin_id in range(n_bins):
+        lower = float(bins[bin_id])
+        upper = float(bins[bin_id + 1])
+        bucket = frame[frame["_bin"] == bin_id]
+        mean_probability = bucket["probability"].mean() if not bucket.empty else np.nan
+        actual_rate = bucket["actual"].mean() if not bucket.empty else np.nan
+        row = {
+            "Probability_Bin": f"{lower:.1f}-{upper:.1f}",
+            "Bin_Lower": lower,
+            "Bin_Upper": upper,
+            "Count": int(len(bucket)),
+            "Mean_Calibrated_Probability": float(mean_probability) if pd.notna(mean_probability) else np.nan,
+            "Actual_High_Performer_Rate": float(actual_rate) if pd.notna(actual_rate) else np.nan,
+            "Calibration_Error": (
+                float(abs(mean_probability - actual_rate))
+                if pd.notna(mean_probability) and pd.notna(actual_rate)
+                else np.nan
+            ),
+        }
+        if raw_probability is not None:
+            raw_mean = bucket["raw_probability"].mean() if not bucket.empty else np.nan
+            row["Mean_Raw_Probability"] = float(raw_mean) if pd.notna(raw_mean) else np.nan
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
 def _score_regression_target(target: str, y_pred: np.ndarray) -> np.ndarray:
     if target in NON_NEGATIVE_TARGETS:
         return np.maximum(y_pred, 0)
     return y_pred
 
 
+def _is_log_transform(transform: str | None) -> bool:
+    return transform in {"log", "log1p"}
+
+
+def regression_target_transform_name(target: str) -> str:
+    if target in NON_NEGATIVE_TARGETS:
+        return "log"
+    return "raw"
+
+
+def transform_regression_target(target: str, values: pd.Series | np.ndarray) -> np.ndarray:
+    return _target_for_fit(target, values, regression_target_transform_name(target))
+
+
+def inverse_transform_regression_target(
+    target: str,
+    values: pd.Series | np.ndarray,
+    *,
+    transform: str | None = None,
+) -> np.ndarray:
+    return _prediction_from_fit(target, values, transform or regression_target_transform_name(target))
+
+
+def score_regression_prediction(
+    target: str,
+    raw_prediction: pd.Series | np.ndarray,
+    *,
+    transform: str | None = None,
+) -> np.ndarray:
+    return inverse_transform_regression_target(target, raw_prediction, transform=transform)
+
+
 def _target_transform(params: dict[str, Any] | None, target: str) -> str:
-    transform = (params or {}).get("_target_transform", "raw")
-    return "log" if transform == "log" and target in NON_NEGATIVE_TARGETS else "raw"
+    transform = (params or {}).get("_target_transform", regression_target_transform_name(target))
+    return "log" if _is_log_transform(transform) and target in NON_NEGATIVE_TARGETS else "raw"
 
 
 def _model_params(params: dict[str, Any]) -> dict[str, Any]:
@@ -121,14 +253,14 @@ def _model_params(params: dict[str, Any]) -> dict[str, Any]:
 
 def _target_for_fit(target: str, y: Iterable[float], transform: str = "raw") -> np.ndarray:
     values = np.asarray(y, dtype="float64")
-    if transform == "log" and target in NON_NEGATIVE_TARGETS:
+    if _is_log_transform(transform) and target in NON_NEGATIVE_TARGETS:
         return np.log1p(np.maximum(values, 0))
     return values
 
 
 def _prediction_from_fit(target: str, y_pred: Iterable[float], transform: str = "raw") -> np.ndarray:
     values = np.asarray(y_pred, dtype="float64")
-    if transform == "log" and target in NON_NEGATIVE_TARGETS:
+    if _is_log_transform(transform) and target in NON_NEGATIVE_TARGETS:
         values = np.expm1(values)
     return _score_regression_target(target, values)
 
@@ -232,12 +364,96 @@ def _best_blend_weight(actual: Iterable[float], model_prediction: np.ndarray, ba
     return best_weight
 
 
+def apply_probability_calibration(
+    raw_probability: pd.Series | np.ndarray,
+    calibrator: ProbabilityCalibrator | None = None,
+) -> np.ndarray:
+    probability = np.clip(np.asarray(raw_probability, dtype=float), 0, 1)
+    if not calibrator:
+        return probability
+
+    model = calibrator.get("model") if isinstance(calibrator, dict) else calibrator
+    if model is None:
+        return probability
+
+    calibrated = model.predict(probability)
+    return np.clip(np.asarray(calibrated, dtype=float), 0, 1)
+
+
+def _fit_probability_calibrator(
+    y_true: pd.Series,
+    raw_probability: np.ndarray,
+    settings: Settings,
+) -> tuple[ProbabilityCalibrator, np.ndarray]:
+    raw_probability = np.clip(np.asarray(raw_probability, dtype=float), 0, 1)
+    min_rows = int(_setting(settings, "min_calibration_rows", 50))
+    enough_rows = len(y_true) >= min_rows
+    enough_classes = y_true.nunique(dropna=True) == 2
+    enough_probability_values = np.unique(raw_probability[~np.isnan(raw_probability)]).size >= 2
+
+    if enough_rows and enough_classes and enough_probability_values:
+        calibrator = IsotonicRegression(y_min=0, y_max=1, out_of_bounds="clip")
+        calibrator.fit(raw_probability, y_true)
+        bundle: ProbabilityCalibrator = {"method": "isotonic", "model": calibrator}
+        return bundle, apply_probability_calibration(raw_probability, bundle)
+
+    bundle = {"method": "identity", "model": None}
+    return bundle, raw_probability
+
+
+def select_classification_threshold(
+    y_true: pd.Series | np.ndarray,
+    probability: pd.Series | np.ndarray,
+    *,
+    default: float = 0.5,
+) -> float:
+    y_true = np.asarray(y_true, dtype=int)
+    probability = np.clip(np.asarray(probability, dtype=float), 0, 1)
+    if len(y_true) == 0:
+        return float(default)
+
+    thresholds = np.unique(np.concatenate(([0.0, default, 1.0], probability)))
+    best_threshold = float(default)
+    best_f1 = -np.inf
+    best_distance = np.inf
+
+    for threshold in thresholds:
+        predicted = (probability >= threshold).astype(int)
+        score = f1_score(y_true, predicted, zero_division=0)
+        distance = abs(float(threshold) - default)
+        if score > best_f1 or (score == best_f1 and distance < best_distance):
+            best_f1 = float(score)
+            best_threshold = float(threshold)
+            best_distance = distance
+
+    return best_threshold
+
+
+def _classification_diagnostics(
+    y_true: pd.Series,
+    probability: np.ndarray,
+    predicted: np.ndarray,
+    *,
+    n_bins: int,
+) -> dict[str, float]:
+    return {
+        "Accuracy": float(accuracy_score(y_true, predicted)),
+        "Precision": float(precision_score(y_true, predicted, zero_division=0)),
+        "Recall": float(recall_score(y_true, predicted, zero_division=0)),
+        "F1": float(f1_score(y_true, predicted, zero_division=0)),
+        "ROC_AUC": _safe_roc_auc(y_true, probability),
+        "Brier_Score": float(brier_score_loss(y_true, probability)) if len(y_true) else np.nan,
+        "Log_Loss": _safe_log_loss(y_true, probability),
+        "Expected_Calibration_Error": _expected_calibration_error(y_true, probability, n_bins=n_bins),
+    }
+
+
 def _build_regressor(params: dict[str, Any], settings: Settings, mode: TrainingMode | None = None) -> CatBoostRegressor:
     budget = _budget(settings, mode)
     transform = params.get("_target_transform", "raw")
     return CatBoostRegressor(
-        loss_function="RMSE" if transform == "log" else "MAE",
-        eval_metric="RMSE" if transform == "log" else "MAE",
+        loss_function="RMSE" if _is_log_transform(transform) else "MAE",
+        eval_metric="RMSE" if _is_log_transform(transform) else "MAE",
         iterations=int(_setting(settings, "regressor_iterations", budget["regressor_iterations"])),
         random_seed=settings.random_seed,
         verbose=_fit_verbose(settings),
@@ -311,6 +527,25 @@ def _fit_classifier(
     return model
 
 
+def _adaptive_rolling_date_splits(development: pd.DataFrame, settings: Settings) -> list[tuple[pd.DataFrame, pd.DataFrame]]:
+    dates = pd.to_datetime(development["First_Observed_Date"]).dropna().unique()
+    max_splits = max(1, len(dates) - 2)
+    preferred_splits = min(int(settings.rolling_validation_folds), max_splits)
+
+    for n_splits in range(preferred_splits, 0, -1):
+        try:
+            return rolling_date_splits(
+                development,
+                n_splits=n_splits,
+                min_training_rows=settings.min_training_rows,
+                min_validation_rows=settings.min_validation_rows,
+            )
+        except ValueError:
+            continue
+
+    raise ValueError("No rolling fold met minimum row requirements.")
+
+
 def tune_regressor(
     development: pd.DataFrame,
     target: str,
@@ -324,12 +559,7 @@ def tune_regressor(
     best_params: dict[str, Any] | None = None
     best_score = np.inf
 
-    folds = rolling_date_splits(
-        development,
-        n_splits=settings.rolling_validation_folds,
-        min_training_rows=settings.min_training_rows,
-        min_validation_rows=settings.min_validation_rows,
-    )
+    folds = _adaptive_rolling_date_splits(development, settings)
 
     for candidate_id, params in enumerate(_limit_candidates(REGRESSOR_PARAMETER_CANDIDATES, settings, mode), 1):
         scores: list[float] = []
@@ -355,6 +585,7 @@ def tune_regressor(
                     "Checkpoint": checkpoint,
                     "Horizon": horizon,
                     "Target": target,
+                    "Target_Transform": transform,
                     "Candidate": candidate_id,
                     "Fold": fold_number,
                     "Best_Iteration": model.get_best_iteration(),
@@ -388,12 +619,7 @@ def tune_classifier(
     if development["is_high_performer"].nunique(dropna=True) < 2:
         return None, pd.DataFrame()
 
-    folds = rolling_date_splits(
-        development,
-        n_splits=settings.rolling_validation_folds,
-        min_training_rows=settings.min_training_rows,
-        min_validation_rows=settings.min_validation_rows,
-    )
+    folds = _adaptive_rolling_date_splits(development, settings)
 
     for candidate_id, params in enumerate(_limit_candidates(CLASSIFIER_PARAMETER_CANDIDATES, settings, mode), 1):
         aucs: list[float] = []
@@ -453,7 +679,7 @@ def tune_shared_hyperparameters(
     settings: Settings,
     *,
     run_regression: bool = True,
-    run_classification: bool = False,
+    run_classification: bool = True,
     targets: Iterable[str] | None = None,
     mode: TrainingMode | None = None,
 ) -> tuple[dict[str, Any], pd.DataFrame, int, int]:
@@ -491,6 +717,8 @@ def _base_prediction_frame(holdout: pd.DataFrame) -> pd.DataFrame:
         "First_Observed_Date",
         "Obs_Window",
         "Horizon",
+        "future_performance_score",
+        "is_high_performer",
     ]
     return holdout[[column for column in columns if column in holdout.columns]].copy()
 
@@ -505,10 +733,10 @@ def train_model_family(
     settings: Settings,
     *,
     run_regression: bool = True,
-    run_classification: bool = False,
+    run_classification: bool = True,
     targets: Iterable[str] | None = None,
     mode: TrainingMode | None = None,
-) -> tuple[dict[str, Any], pd.DataFrame, dict[str, Any], pd.DataFrame]:
+) -> tuple[dict[str, Any], pd.DataFrame, dict[str, Any], pd.DataFrame, pd.DataFrame]:
     development, holdout, holdout_start = split_development_and_holdout(snapshot, settings.final_test_fraction)
     threshold = np.nan
     if run_classification:
@@ -525,7 +753,11 @@ def train_model_family(
         "horizon": horizon,
         "categorical_features": categorical,
         "regressors": {},
+        "target_transforms": {},
+        "regression_target_transforms": {},
         "classifier": None,
+        "probability_calibrator": {"method": "identity", "model": None},
+        "classification_threshold": float(_setting(settings, "classification_threshold", 0.5)),
         "best_parameters": {},
         "confidence_scores": {},
         "high_score_threshold": threshold,
@@ -555,12 +787,12 @@ def train_model_family(
                 validation = None
 
             model = _build_regressor(params, settings, mode)
-            transform = _target_transform(params, target)
-            _fit_regressor(model, train, validation, target, categorical, settings, mode, transform)
+            target_transform = _target_transform(params, target)
+            _fit_regressor(model, train, validation, target, categorical, settings, mode, target_transform)
             model_prediction = _prediction_from_fit(
                 target,
                 model.predict(prepare_features(holdout_target, categorical)),
-                transform,
+                target_transform,
             )
             baseline = _baseline_prediction(holdout_target, target)
             baseline_metrics = regression_metrics(holdout_target[target], baseline)
@@ -570,7 +802,7 @@ def train_model_family(
                 validation_prediction = _prediction_from_fit(
                     target,
                     model.predict(prepare_features(validation, categorical)),
-                    transform,
+                    target_transform,
                 )
                 validation_baseline = _baseline_prediction(validation, target)
                 blend_weight = _best_blend_weight(validation[target], validation_prediction, validation_baseline)
@@ -581,19 +813,18 @@ def train_model_family(
 
             prediction = blend_weight * model_prediction + (1 - blend_weight) * baseline
             metrics = regression_metrics(holdout_target[target], prediction)
-            if pd.isna(confidence_table.get("fallback")):
-                confidence_table["fallback"] = _confidence_from_wape(metrics["WAPE"])
-            confidence = confidence_from_prediction(
-                prediction,
-                confidence_table,
-                holdout_target.get("observation_coverage"),
-            )
+            metric_confidence = _confidence_from_wape(metrics["WAPE"])
+            if pd.isna(metric_confidence):
+                metric_confidence = confidence_table.get("fallback", np.nan)
+            confidence_table["fallback"] = metric_confidence
+            confidence = np.full(len(holdout_target), metric_confidence, dtype="float64")
 
             evaluations.append(
                 {
                     "Checkpoint": checkpoint,
                     "Horizon": horizon,
                     "Target": target,
+                    "Target_Transform": target_transform,
                     "Holdout_Start": holdout_start,
                     "Best_Iteration": model.get_best_iteration(),
                     **params,
@@ -608,10 +839,11 @@ def train_model_family(
             )
             bundle["regressors"][target] = model
             bundle["best_parameters"][target] = params
-            bundle.setdefault("target_transforms", {})[target] = transform
+            bundle["target_transforms"][target] = target_transform
+            bundle["regression_target_transforms"][target] = target_transform
             bundle.setdefault("blend_weights", {})[target] = blend_weight
             bundle.setdefault("confidence_tables", {})[target] = confidence_table
-            bundle["confidence_scores"][target] = float(np.nanmean(confidence))
+            bundle["confidence_scores"][target] = float(metric_confidence)
             short_name = target.replace("target_", "")
             predictions.loc[holdout_target.index, f"actual_{short_name}"] = holdout_target[target]
             predictions.loc[holdout_target.index, f"baseline_{short_name}_week_4"] = baseline
@@ -631,6 +863,7 @@ def train_model_family(
                     ]
 
     class_eval: dict[str, Any] = {}
+    calibration_bins = pd.DataFrame()
     params = shared_parameters.get("classifier")
     if run_classification and params is not None and development["is_high_performer"].nunique() >= 2:
         train, validation, _ = split_development_and_holdout(development, 0.15)
@@ -642,27 +875,77 @@ def train_model_family(
         else:
             _fit_classifier(classifier, development, None, categorical, settings, mode)
 
-        probability = classifier.predict_proba(prepare_features(holdout, categorical))[:, 1]
-        predicted = (probability >= float(_setting(settings, "classification_threshold", 0.5))).astype(int)
+        default_threshold = float(_setting(settings, "classification_threshold", 0.5))
+        classification_threshold = default_threshold
+        calibrator: ProbabilityCalibrator = {"method": "identity", "model": None}
+        validation_eval: dict[str, Any] = {}
+        n_bins = int(_setting(settings, "calibration_bins", 10))
+
+        if validation is not None and not validation.empty and validation["is_high_performer"].nunique() >= 2:
+            raw_validation_probability = classifier.predict_proba(prepare_features(validation, categorical))[:, 1]
+            calibrator, validation_probability = _fit_probability_calibrator(
+                validation["is_high_performer"],
+                raw_validation_probability,
+                settings,
+            )
+            classification_threshold = select_classification_threshold(
+                validation["is_high_performer"],
+                validation_probability,
+                default=default_threshold,
+            )
+            validation_predicted = (validation_probability >= classification_threshold).astype(int)
+            validation_eval = {
+                f"Validation_{key}": value
+                for key, value in _classification_diagnostics(
+                    validation["is_high_performer"],
+                    validation_probability,
+                    validation_predicted,
+                    n_bins=n_bins,
+                ).items()
+            }
+
+        raw_probability = classifier.predict_proba(prepare_features(holdout, categorical))[:, 1]
+        probability = apply_probability_calibration(raw_probability, calibrator)
+        predicted = (probability >= classification_threshold).astype(int)
         y_true = holdout["is_high_performer"]
         class_eval = {
             "Checkpoint": checkpoint,
             "Horizon": horizon,
             "Holdout_Start": holdout_start,
             "Best_Iteration": classifier.get_best_iteration(),
-            "Accuracy": accuracy_score(y_true, predicted),
-            "Precision": precision_score(y_true, predicted, zero_division=0),
-            "Recall": recall_score(y_true, predicted, zero_division=0),
-            "F1": f1_score(y_true, predicted, zero_division=0),
-            "ROC_AUC": _safe_roc_auc(y_true, probability),
+            "Calibrator_Method": calibrator["method"],
+            "Classification_Threshold": classification_threshold,
+            **_classification_diagnostics(y_true, probability, predicted, n_bins=n_bins),
+            "Raw_ROC_AUC": _safe_roc_auc(y_true, raw_probability),
+            "Raw_Brier_Score": float(brier_score_loss(y_true, raw_probability)) if len(y_true) else np.nan,
+            "Raw_Log_Loss": _safe_log_loss(y_true, raw_probability),
+            "Raw_Expected_Calibration_Error": _expected_calibration_error(
+                y_true,
+                raw_probability,
+                n_bins=n_bins,
+            ),
+            **validation_eval,
             **params,
         }
+        calibration_bins = probability_calibration_bins(
+            y_true,
+            probability,
+            raw_probability=raw_probability,
+            n_bins=n_bins,
+        )
+        calibration_bins.insert(0, "Dataset", "Holdout")
+        calibration_bins.insert(0, "Horizon", horizon)
+        calibration_bins.insert(0, "Checkpoint", checkpoint)
         bundle["classifier"] = classifier
+        bundle["probability_calibrator"] = calibrator
+        bundle["classification_threshold"] = classification_threshold
         bundle["best_parameters"]["is_high_performer"] = params
+        predictions["raw_probability_high_performance"] = raw_probability
         predictions["probability_high_performance"] = probability
+        predictions["classification_threshold"] = classification_threshold
         predictions["predicted_high_performer"] = predicted
 
-    return bundle, pd.DataFrame(evaluations), class_eval, predictions
+    return bundle, pd.DataFrame(evaluations), class_eval, predictions, calibration_bins
 
 
 def train_all_model_families(
@@ -670,7 +953,7 @@ def train_all_model_families(
     settings: Settings,
     *,
     run_regression: bool = True,
-    run_classification: bool = False,
+    run_classification: bool = True,
     targets: Iterable[str] | None = None,
     mode: TrainingMode | None = None,
     max_families: int | None = None,
@@ -688,7 +971,7 @@ def train_all_model_families(
         Switch model families on/off while debugging. This is useful when CatBoost
         classifiers are the bottleneck.
     targets:
-        Optional subset of regression targets. Example: ["target_ggr"].
+        Optional subset of regression targets. Example: ["target_clients"].
     mode:
         ``"quick"``, ``"standard"`` or ``"production"``. Defaults to
         ``settings.training_mode`` if present, otherwise ``"quick"``.
@@ -716,6 +999,7 @@ def train_all_model_families(
     bundles: dict[tuple[int, int], dict[str, Any]] = {}
     regression_frames: list[pd.DataFrame] = []
     classification_rows: list[dict[str, Any]] = []
+    calibration_frames: list[pd.DataFrame] = []
     prediction_frames: list[pd.DataFrame] = []
     skipped: list[dict[str, Any]] = []
 
@@ -736,7 +1020,7 @@ def train_all_model_families(
             print(f"Training family day {checkpoint} -> horizon {horizon} [{active_mode}] ...")
 
         try:
-            bundle, regression_eval, classification_eval, predictions = train_model_family(
+            bundle, regression_eval, classification_eval, predictions, calibration_bins = train_model_family(
                 snapshot,
                 checkpoint,
                 horizon,
@@ -755,6 +1039,8 @@ def train_all_model_families(
                 regression_frames.append(regression_eval)
             if classification_eval:
                 classification_rows.append(classification_eval)
+            if not calibration_bins.empty:
+                calibration_frames.append(calibration_bins)
             if not predictions.empty:
                 prediction_frames.append(predictions)
         except ValueError as exc:
@@ -768,6 +1054,7 @@ def train_all_model_families(
         "model_bundles": bundles,
         "regression_evaluation": _safe_concat(regression_frames),
         "classification_evaluation": pd.DataFrame(classification_rows),
+        "classification_calibration": _safe_concat(calibration_frames),
         "hyperparameter_tuning": tuning_df,
         "holdout_predictions": _safe_concat(prediction_frames),
         "skipped_configurations": pd.DataFrame(skipped),

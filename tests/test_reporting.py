@@ -3,10 +3,10 @@ from pathlib import Path
 import pandas as pd
 from openpyxl import load_workbook
 
-from game_performance.reporting import build_holdout_comparison, export_excel
+from game_performance.reporting import build_calibration_report, build_holdout_comparison, export_excel
 
 
-def test_holdout_comparison_uses_week4_confidence_and_off_flags():
+def test_holdout_comparison_uses_week4_probability_and_off_flags():
     holdout = pd.DataFrame(
         {
             "Game_ID": [1],
@@ -39,15 +39,34 @@ def test_holdout_comparison_uses_week4_confidence_and_off_flags():
     assert comparison.loc[0, "probability_clients"] == 0.85
     assert comparison.loc[0, "off_by_10_pct"] == 1
     assert comparison.loc[0, "off_by_20_pct"] == 0
+    assert "accuracy_clients" not in comparison.columns
     assert "absolute_error_clients" not in comparison.columns
     assert "variance_pct_clients" not in comparison.columns
     assert "High_Performer_Match" not in comparison.columns
 
 
-def test_export_excel_keeps_stakes_and_clients_sheets_only():
+def test_calibration_report_buckets_confidence_against_actual_rate():
+    comparison = pd.DataFrame(
+        {
+            "is_high_performer": [0, 1, 1],
+            "probability_high_performance": [0.05, 0.72, 0.76],
+            "raw_probability_high_performance": [0.15, 0.90, 0.95],
+        }
+    )
+
+    report = build_calibration_report(comparison, bins=2)
+
+    assert list(report["Probability_Bin"]) == ["0.0-0.5", "0.5-1.0"]
+    assert list(report["Count"]) == [1, 2]
+    assert report.loc[1, "Actual_High_Performer_Rate"] == 1.0
+    assert "Mean_Raw_Probability" in report.columns
+
+
+def test_export_excel_keeps_clients_stakes_metrics_and_calibration_sheets():
     comparison = pd.DataFrame(
         {
             "Game_ID": [1, 2],
+            "predicted_high_performer": [0, 1],
             "actual_clients": [10, 20],
             "predicted_clients": [11, 19],
             "actual_stakes": [100, 200],
@@ -86,8 +105,10 @@ def test_export_excel_keeps_stakes_and_clients_sheets_only():
 
         assert workbook.sheetnames == [
             "Holdout Comparison",
+            "High Performers",
             "Forecasts",
             "Model Accuracy",
+            "future_performance_score_calcul",
         ]
 
         forecast_headers = next(workbook["Forecasts"].iter_rows(values_only=True))
@@ -103,6 +124,11 @@ def test_export_excel_keeps_stakes_and_clients_sheets_only():
         assert accuracy_rows[0] == ("Target", "MAE")
         assert accuracy_rows[1] == ("target_clients", 1.0)
         assert accuracy_rows[2] == ("target_stakes", 3.0)
+
+        score_rows = list(workbook["future_performance_score_calcul"].iter_rows(values_only=True))
+        assert score_rows[0][:3] == ("Metric", "Target field", "Weight")
+        assert score_rows[1][:3] == ("Future Clients", "target_clients", 0.50)
+        assert score_rows[2][:3] == ("Future Stakes", "target_stakes", 0.50)
     finally:
         if workbook is not None:
             workbook.close()

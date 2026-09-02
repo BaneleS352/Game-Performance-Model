@@ -3,16 +3,40 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .features import OBSERVATION_WINDOW_DAYS, PREDICTION_WEEK_END, REGRESSION_TARGETS, build_four_week_snapshot, prepare_features
-from .modeling import confidence_from_prediction, _baseline_prediction, _prediction_from_fit
+from .features import (
+    OBSERVATION_WINDOW_DAYS,
+    PREDICTION_WEEK_END,
+    REGRESSION_TARGETS,
+    build_four_week_snapshot,
+    prepare_features,
+)
+from .modeling import (
+    _baseline_prediction,
+    _prediction_from_fit,
+    apply_probability_calibration,
+    confidence_from_prediction,
+)
 
 
 def assign_merchandising_recommendation(row: pd.Series) -> str:
+    probability = row.get("probability_high_performance", np.nan)
     predicted_clients = row.get("predicted_clients_week_4", np.nan)
     predicted_stakes = row.get("predicted_stakes_week_4", np.nan)
-    horizon = row.get("Horizon", np.nan)
-    if pd.notna(predicted_clients) and pd.notna(predicted_stakes) and predicted_clients > 0 and predicted_stakes > 0:
+
+    has_positive_activity = (
+        pd.notna(predicted_clients)
+        and pd.notna(predicted_stakes)
+        and predicted_clients > 0
+        and predicted_stakes > 0
+    )
+    if pd.notna(probability) and probability >= 0.80 and has_positive_activity:
         return "Priority placement for week 4"
+    if pd.notna(probability) and probability >= 0.60 and pd.notna(predicted_stakes) and predicted_stakes > 0:
+        return "Increase visibility for week 4"
+    if pd.notna(probability) and probability >= 0.40:
+        return "Standard placement with monitoring"
+    if pd.notna(predicted_stakes) and predicted_stakes <= 0:
+        return "Do not promote; review low stakes forecast"
     return "Standard catalogue placement"
 
 
@@ -28,17 +52,44 @@ def score_snapshot(snapshot: pd.DataFrame, model_bundle: dict) -> pd.DataFrame:
         if target not in REGRESSION_TARGETS:
             continue
         short = target.replace("target_", "")
-        transform = model_bundle.get("target_transforms", {}).get(target, "raw")
+        transform = (
+            model_bundle.get("target_transforms", {}).get(target)
+            or model_bundle.get("regression_target_transforms", {}).get(target, "raw")
+        )
         model_pred = _prediction_from_fit(target, model.predict(x), transform)
         baseline_pred = _baseline_prediction(snapshot, target)
         blend_weight = model_bundle.get("blend_weights", {}).get(target, 1.0)
         pred = blend_weight * model_pred + (1 - blend_weight) * baseline_pred
         result[f"predicted_{short}_week_4"] = pred
-        result[f"confidence_{short}"] = confidence_from_prediction(
-            pred,
-            model_bundle.get("confidence_tables", {}).get(target),
-            snapshot.get("observation_coverage"),
+        metric_confidence = model_bundle.get("confidence_scores", {}).get(target)
+        confidence_table = model_bundle.get("confidence_tables", {}).get(target)
+        if confidence_table and confidence_table.get("bins"):
+            result[f"confidence_{short}"] = confidence_from_prediction(
+                pred,
+                confidence_table,
+                snapshot.get("observation_coverage"),
+            )
+        elif metric_confidence is not None and pd.notna(metric_confidence):
+            result[f"confidence_{short}"] = float(metric_confidence)
+        else:
+            result[f"confidence_{short}"] = confidence_from_prediction(
+                pred,
+                confidence_table,
+                snapshot.get("observation_coverage"),
+            )
+
+    classifier = model_bundle.get("classifier")
+    if classifier is not None:
+        raw_probability = classifier.predict_proba(x)[:, 1]
+        result["raw_probability_high_performance"] = raw_probability
+        result["probability_high_performance"] = apply_probability_calibration(
+            raw_probability,
+            model_bundle.get("probability_calibrator"),
         )
+        threshold = float(model_bundle.get("classification_threshold", 0.50))
+        result["classification_threshold"] = threshold
+        result["predicted_high_performer"] = (result["probability_high_performance"] >= threshold).astype(int)
+
     result["recommendation"] = result.apply(assign_merchandising_recommendation, axis=1)
     result["scored_at"] = pd.Timestamp.now(tz="UTC")
     return result

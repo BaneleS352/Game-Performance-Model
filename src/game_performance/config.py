@@ -11,10 +11,12 @@ class Settings:
     source_file: Path = field(default_factory=lambda: Path(os.getenv("GAME_DATA_FILE", "data/raw/game_performance.xlsx")))
     random_seed: int = 42
     high_performer_percentile: float = 0.80
-    rolling_validation_folds: int = 2
+    rolling_validation_folds: int = 4
     final_test_fraction: float = 0.15
     min_training_rows: int = 100
     min_validation_rows: int = 25
+    min_calibration_rows: int = 50
+    calibration_bins: int = 10
     representative_tuning_checkpoint: int = 14
     representative_tuning_horizon: int = 14
 

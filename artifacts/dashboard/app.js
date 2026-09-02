@@ -32,7 +32,6 @@
     setText("totalClients", fmtWhole(summary.total_predicted_clients_week_4));
     setText("gamesScored", fmtWhole(summary.games_scored));
     setText("systemsScored", `${fmtWhole(summary.systems_scored)} systems scored`);
-    setText("confidenceBlend", fmtPct((number(summary.confidence_clients) + number(summary.confidence_stakes)) / 2));
     setText("within10", fmtPct(1 - number(summary.holdout_off_by_10_rate)));
     setText("within20", fmtPct(1 - number(summary.holdout_off_by_20_rate)));
     setText("clientProbability", fmtPct(summary.avg_probability_clients));
@@ -52,18 +51,20 @@
       });
   }
 
-  function renderSystemBars() {
-    const top = data.systems.slice(0, 10);
+  function renderFocusBars() {
+    const top = [...(data.top_stakes || data.forecasts || [])]
+      .sort((a, b) => number(b.predicted_stakes_week_4) - number(a.predicted_stakes_week_4))
+      .slice(0, 10);
     const max = Math.max(...top.map((row) => number(row.predicted_stakes_week_4)), 1);
-    byId("systemCount").textContent = `Top ${top.length} of ${data.systems.length} systems by stakes`;
-    byId("systemBars").innerHTML = top
+    byId("focusCount").textContent = `Top ${top.length} of ${fmtWhole(data.summary.games_scored)} games by stakes`;
+    byId("focusBars").innerHTML = top
       .map((row) => {
         const width = Math.max(3, (number(row.predicted_stakes_week_4) / max) * 100);
         return `
-          <div class="system-row">
+          <div class="focus-row">
             <div>
-              <div class="system-name">${escapeHtml(row.SystemName || "Unknown")}</div>
-              <div class="subtle">${fmtWhole(row.games)} games</div>
+              <div class="focus-name">${escapeHtml(row.TournamentName || row.Game_ID || "Unknown game")}</div>
+              <div class="subtle">${escapeHtml(row.SystemName || "Unknown system")}</div>
             </div>
             <div class="bar-track" aria-hidden="true"><div class="bar-fill" style="width:${width}%"></div></div>
             <div class="num">${fmtMoney(row.predicted_stakes_week_4)}</div>
@@ -98,6 +99,13 @@
   function renderRows() {
     const rows = filteredRows();
     byId("rowCount").textContent = `${fmtWhole(rows.length)} games shown`;
+    if (!rows.length) {
+      byId("gameRows").innerHTML = `
+          <tr>
+            <td class="empty-row" colspan="7">No games match the current filters.</td>
+          </tr>`;
+      return;
+    }
     byId("gameRows").innerHTML = rows
       .slice(0, 300)
       .map((row) => {
@@ -122,8 +130,12 @@
   function bindControls() {
     document.querySelectorAll(".tab").forEach((button) => {
       button.addEventListener("click", () => {
-        document.querySelectorAll(".tab").forEach((tab) => tab.classList.remove("active"));
+        document.querySelectorAll(".tab").forEach((tab) => {
+          tab.classList.remove("active");
+          tab.setAttribute("aria-selected", "false");
+        });
         button.classList.add("active");
+        button.setAttribute("aria-selected", "true");
         state.view = button.dataset.view;
         renderRows();
       });
@@ -159,7 +171,7 @@
 
   renderSummary();
   renderSystemOptions();
-  renderSystemBars();
+  renderFocusBars();
   bindControls();
   renderRows();
 })();

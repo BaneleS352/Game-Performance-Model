@@ -10,14 +10,39 @@ def test_live_snapshot_contains_no_future_targets():
         "SystemName": ["SYS"] * 7,
         "TournamentName": ["Game"] * 7,
         "Clients": range(1, 8),
-        "Betcount": range(2, 9),
         "Stakes": range(10, 17),
-        "GGR": range(1, 8),
     })
     data = clean_game_daily(raw)
     snapshot = build_lifecycle_snapshot(data, 7, 7, require_future=False)
+
     assert len(snapshot) == 1
     assert not any(column.startswith("target_") for column in snapshot.columns)
+    assert snapshot.loc[0, "clients_first"] == 1
+    assert snapshot.loc[0, "clients_last"] == 7
+    assert snapshot.loc[0, "clients_positive_days"] == 7
+    assert snapshot.loc[0, "Observation_End_Weekday"] == "Wednesday"
+
+
+def test_historical_snapshot_targets_clients_and_stakes_only():
+    raw = pd.DataFrame({
+        "Date": pd.date_range("2026-01-01", periods=14),
+        "SystemName": ["SYS"] * 14,
+        "TournamentName": ["Game"] * 14,
+        "Clients": range(1, 15),
+        "Stakes": range(10, 24),
+    })
+    data = clean_game_daily(raw)
+    snapshot = build_lifecycle_snapshot(data, 7, 7, require_future=True)
+
+    target_columns = [column for column in snapshot.columns if column.startswith("target_")]
+    assert target_columns == [
+        "target_clients",
+        "target_stakes",
+        "target_clients_week_1",
+        "target_clients_week_2",
+        "target_stakes_week_1",
+        "target_stakes_week_2",
+    ]
 
 
 def test_four_week_snapshot_uses_week_4_targets():
@@ -26,9 +51,7 @@ def test_four_week_snapshot_uses_week_4_targets():
         "SystemName": ["SYS"] * 28,
         "TournamentName": ["Game"] * 28,
         "Clients": [1] * 28,
-        "Betcount": [2] * 28,
         "Stakes": [10] * 28,
-        "GGR": [1] * 28,
     })
     data = clean_game_daily(raw)
     snapshot = build_four_week_snapshot(data)
@@ -48,9 +71,7 @@ def test_four_week_snapshot_adds_week_1_and_2_training_signals():
         "SystemName": ["SYS"] * 28,
         "TournamentName": ["Game"] * 28,
         "Clients": ([10] * 7) + ([20] * 7) + ([30] * 14),
-        "Betcount": [2] * 28,
         "Stakes": ([100] * 7) + ([150] * 7) + ([200] * 14),
-        "GGR": [1] * 28,
     })
     data = clean_game_daily(raw)
     snapshot = build_four_week_snapshot(data)

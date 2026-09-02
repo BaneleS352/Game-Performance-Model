@@ -64,8 +64,8 @@ def create_high_performance_target(
 ):
     """Fit score references on development only, then apply them to holdout."""
     weights = {
-        "target_stakes": 0.60,
-        "target_clients": 0.40,
+        "target_clients": 0.50,
+        "target_stakes": 0.50,
     }
     references = {metric: np.sort(development[metric].dropna().to_numpy()) for metric in weights}
     medians = {metric: development[metric].median() for metric in weights}

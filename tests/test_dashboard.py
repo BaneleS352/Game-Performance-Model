@@ -51,6 +51,7 @@ def test_dashboard_data_summarises_workbook():
         assert data["summary"]["games_scored"] == 2
         assert data["summary"]["holdout_games"] == 1
         assert data["summary"]["total_predicted_stakes_week_4"] == 1500
+        assert data["summary"]["avg_probability_clients"] == 0.9
         assert data["systems"][0]["SystemName"] == "SYS"
         assert "predicted_ggr" not in data["forecasts"][0]
     finally:

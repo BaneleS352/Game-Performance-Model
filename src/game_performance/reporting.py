@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -21,9 +23,9 @@ def _period_columns(frame: pd.DataFrame) -> pd.DataFrame:
 
 def _prediction_probability(actual: pd.Series, predicted: pd.Series) -> pd.Series:
     denominator = actual.abs().replace(0, np.nan)
-    probability = 1 - (predicted - actual).abs() / denominator
-    probability = probability.clip(lower=0, upper=1)
-    return probability.mask(denominator.isna(), predicted.eq(actual).astype(float))
+    accuracy = 1 - (predicted - actual).abs() / denominator
+    accuracy = accuracy.clip(lower=0, upper=1)
+    return accuracy.mask(denominator.isna(), np.where(predicted.eq(actual), 1.0, 0.0))
 
 
 def _growth_percentage(week_1: pd.Series, week_2: pd.Series) -> pd.Series:
@@ -103,12 +105,10 @@ def build_holdout_comparison(
     # Error calculations
     # ------------------------------------------------------------------
     for metric in metrics:
-
         actual = f"actual_{metric}_week_4"
         predicted = f"predicted_{metric}_week_4"
 
         if {actual, predicted}.issubset(test.columns):
-
             variance = test[predicted] - test[actual]
 
             test[f"variance_{metric}"] = variance
@@ -134,10 +134,6 @@ def build_holdout_comparison(
     # Business-friendly column ordering
     # ------------------------------------------------------------------
     ordered_columns = [
-
-        # ==============================================================
-        # Game information
-        # ==============================================================
         "Game_ID",
         "TournamentName",
         "SystemName",
@@ -150,14 +146,15 @@ def build_holdout_comparison(
         "Horizon",
         "off_by_10_pct",
         "off_by_20_pct",
-
+        "future_performance_score",
+        "is_high_performer",
+        "raw_probability_high_performance",
+        "probability_high_performance",
+        "classification_threshold",
+        "predicted_high_performer",
     ]
 
-    # ==============================================================
-    # Group metrics together
-    # ==============================================================
     for metric in metrics:
-
         ordered_columns.extend(
             [
                 f"actual_{metric}_week_3",
@@ -171,29 +168,84 @@ def build_holdout_comparison(
             ]
         )
 
-    # ------------------------------------------------------------------
-    # Keep only columns that exist
-    # ------------------------------------------------------------------
     ordered_columns = [
         col
         for col in ordered_columns
         if col in test.columns
     ]
 
-    return test[ordered_columns]
+    remaining_columns = [
+        col
+        for col in test.columns
+        if col not in ordered_columns
+    ]
+
+    return test[ordered_columns + remaining_columns]
+
+
+def build_calibration_report(comparison: pd.DataFrame, *, bins: int = 10) -> pd.DataFrame:
+    """Bucket calibrated high-performer probability against observed hit rates."""
+    required = {"is_high_performer", "probability_high_performance"}
+    if comparison.empty or not required.issubset(comparison.columns):
+        return pd.DataFrame()
+
+    frame = pd.DataFrame(
+        {
+            "actual": pd.to_numeric(comparison["is_high_performer"], errors="coerce"),
+            "probability": pd.to_numeric(comparison["probability_high_performance"], errors="coerce").clip(0, 1),
+        }
+    )
+    if "raw_probability_high_performance" in comparison.columns:
+        frame["raw_probability"] = pd.to_numeric(
+            comparison["raw_probability_high_performance"],
+            errors="coerce",
+        ).clip(0, 1)
+    frame = frame.dropna(subset=["actual", "probability"])
+    if frame.empty:
+        return pd.DataFrame()
+
+    edges = np.linspace(0, 1, bins + 1)
+    frame["_bin"] = np.digitize(frame["probability"], edges[1:-1], right=False)
+    rows: list[dict[str, float | int | str]] = []
+
+    for bin_id in range(bins):
+        lower = float(edges[bin_id])
+        upper = float(edges[bin_id + 1])
+        bucket = frame[frame["_bin"] == bin_id]
+        mean_probability = bucket["probability"].mean() if not bucket.empty else np.nan
+        actual_rate = bucket["actual"].mean() if not bucket.empty else np.nan
+        row: dict[str, float | int | str] = {
+            "Probability_Bin": f"{lower:.1f}-{upper:.1f}",
+            "Bin_Lower": lower,
+            "Bin_Upper": upper,
+            "Count": int(len(bucket)),
+            "Mean_Calibrated_Probability": float(mean_probability) if pd.notna(mean_probability) else np.nan,
+            "Actual_High_Performer_Rate": float(actual_rate) if pd.notna(actual_rate) else np.nan,
+            "Calibration_Error": (
+                float(abs(mean_probability - actual_rate))
+                if pd.notna(mean_probability) and pd.notna(actual_rate)
+                else np.nan
+            ),
+        }
+        if "raw_probability" in frame.columns:
+            raw_mean = bucket["raw_probability"].mean() if not bucket.empty else np.nan
+            row["Mean_Raw_Probability"] = float(raw_mean) if pd.notna(raw_mean) else np.nan
+        rows.append(row)
+
+    return pd.DataFrame(rows)
 
 
 def build_training_view(
     snapshot: pd.DataFrame,
     *,
-    checkpoint=14,
-    horizon=7,
+    checkpoint=OBSERVATION_WINDOW_DAYS,
+    horizon=PREDICTION_WEEK_END - OBSERVATION_WINDOW_DAYS,
     test_fraction=0.15,
     percentile=0.80,
 ):
     development, holdout, holdout_start = split_development_and_holdout(snapshot, test_fraction)
     development, _, threshold = create_high_performance_target(development, holdout, percentile)
-    development = _period_columns(development, checkpoint, horizon)
+    development = _period_columns(development)
     return development, holdout_start, threshold
 
 
@@ -243,6 +295,10 @@ def _forecast_export_columns(forecasts: pd.DataFrame) -> pd.DataFrame:
         "confidence_clients",
         "predicted_stakes_week_4",
         "confidence_stakes",
+        "raw_probability_high_performance",
+        "probability_high_performance",
+        "classification_threshold",
+        "predicted_high_performer",
         "Checkpoint",
         "As_Of_Date",
         "scored_at",
@@ -257,6 +313,25 @@ def _model_accuracy(regression: pd.DataFrame) -> pd.DataFrame:
     return regression[regression["Target"].isin(keep_targets)].copy()
 
 
+def _score_calculation_sheet() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "Metric": "Future Clients",
+                "Target field": "target_clients",
+                "Weight": 0.50,
+                "Calculation note": "Empirical percentile within the development dataset.",
+            },
+            {
+                "Metric": "Future Stakes",
+                "Target field": "target_stakes",
+                "Weight": 0.50,
+                "Calculation note": "Empirical percentile within the development dataset.",
+            },
+        ]
+    )
+
+
 def export_excel(
     path,
     *,
@@ -264,15 +339,28 @@ def export_excel(
     forecasts: pd.DataFrame,
     regression: pd.DataFrame,
     classification: pd.DataFrame,
+    calibration: pd.DataFrame | None = None,
 ):
     """Export business/model outputs to an Excel workbook."""
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    calibration = build_calibration_report(comparison) if calibration is None else calibration
 
     sheets = [
         ("Holdout Comparison", comparison),
+        ("High Performers", _high_performers(comparison)),
         ("Forecasts", _forecast_export_columns(forecasts)),
         ("Model Accuracy", _model_accuracy(regression)),
     ]
+    sheets.extend(
+        (name, frame)
+        for name, frame in (
+            ("Classification Metrics", classification),
+            ("Calibration", calibration),
+        )
+        if isinstance(frame, pd.DataFrame) and not frame.empty
+    )
+    sheets.append(("future_performance_score_calculator", _score_calculation_sheet()))
 
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         for name, frame in sheets:
@@ -291,6 +379,20 @@ def export_excel(
 
             # Freeze header
             ws.freeze_panes = "A2"
+
+            if name == "future_performance_score_calculator":
+                ws["F1"] = "Formula"
+                ws["F2"] = (
+                    "future_performance_score = 50% * percentile(Future Clients) "
+                    "+ 50% * percentile(Future Stakes)"
+                )
+                ws["F4"] = "High performer flag"
+                ws["F5"] = (
+                    "Marked high performer when future_performance_score is at or above "
+                    "the 80th percentile threshold from the development scored dataset."
+                )
+                ws["C2"].number_format = "0%"
+                ws["C3"].number_format = "0%"
 
             # Auto-size columns
             for column_cells in ws.columns:

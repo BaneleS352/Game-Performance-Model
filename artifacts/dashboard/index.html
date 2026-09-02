@@ -9,7 +9,7 @@
   </head>
   <body>
     <header class="topbar">
-      <div>
+      <div class="topbar-copy">
         <p class="eyebrow">Week 4 forecast cockpit</p>
         <h1>Choose where the team should focus next week.</h1>
         <p class="lede">
@@ -40,11 +40,6 @@
           <span>Games ready for review</span>
           <strong id="gamesScored">-</strong>
           <small id="systemsScored">-</small>
-        </article>
-        <article class="kpi-card">
-          <span>Model confidence</span>
-          <strong id="confidenceBlend">-</strong>
-          <small>Clients and stakes combined</small>
         </article>
       </section>
 
@@ -99,15 +94,15 @@
         </article>
       </section>
 
-      <section class="panel system-panel">
+      <section class="panel focus-panel">
         <div class="section-title row-title">
           <div>
             <p class="eyebrow">Where to focus</p>
-            <h2>Systems carrying predicted Week 4 value</h2>
+            <h2>Games carrying predicted Week 4 value</h2>
           </div>
-          <span class="quiet" id="systemCount">Top systems by stakes</span>
+          <span class="quiet" id="focusCount">Top games by stakes</span>
         </div>
-        <div id="systemBars" class="system-bars" aria-live="polite"></div>
+        <div id="focusBars" class="focus-bars" aria-live="polite"></div>
       </section>
 
       <section class="panel controls-panel">
@@ -117,10 +112,10 @@
             <h2>Games to use in weekly decisions</h2>
           </div>
           <div class="tab-group" role="tablist" aria-label="Action queue views">
-            <button class="tab active" data-view="top_stakes" type="button">Top stakes</button>
-            <button class="tab" data-view="top_clients" type="button">Top clients</button>
-            <button class="tab" data-view="review_candidates" type="button">Review list</button>
-            <button class="tab" data-view="forecasts" type="button">All games</button>
+            <button class="tab active" data-view="top_stakes" type="button" role="tab" aria-selected="true">Top stakes</button>
+            <button class="tab" data-view="top_clients" type="button" role="tab" aria-selected="false">Top clients</button>
+            <button class="tab" data-view="review_candidates" type="button" role="tab" aria-selected="false">Review list</button>
+            <button class="tab" data-view="forecasts" type="button" role="tab" aria-selected="false">All games</button>
           </div>
         </div>
 
@@ -156,7 +151,7 @@
                 <th>Stake confidence</th>
                 <th>Predicted clients</th>
                 <th>Client confidence</th>
-                <th>Signal</th>
+                <th>Recommended action</th>
               </tr>
             </thead>
             <tbody id="gameRows"></tbody>
