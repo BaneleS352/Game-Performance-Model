@@ -22,10 +22,53 @@ def _period_columns(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def _prediction_probability(actual: pd.Series, predicted: pd.Series) -> pd.Series:
-    denominator = actual.abs().replace(0, np.nan)
-    accuracy = 1 - (predicted - actual).abs() / denominator
-    accuracy = accuracy.clip(lower=0, upper=1)
-    return accuracy.mask(denominator.isna(), np.where(predicted.eq(actual), 1.0, 0.0))
+    """
+    Calculate prediction accuracy as a probability between 0 and 1.
+
+    1.0 = exact prediction
+    0.9 = prediction is 10% off
+    0.8 = prediction is 20% off
+    0.0 = prediction is 100%+ off
+
+    Missing actual/predicted values remain NaN.
+    If actual is zero:
+        - predicted zero -> 1.0
+        - predicted non-zero -> 0.0
+    """
+
+    # Force both inputs to numeric.
+    # pd.NA, invalid strings, etc. become np.nan.
+    actual = pd.to_numeric(actual, errors="coerce").astype("float64")
+    predicted = pd.to_numeric(predicted, errors="coerce").astype("float64")
+
+    # Start with missing values
+    probability = pd.Series(np.nan, index=actual.index, dtype="float64")
+
+    # Rows where both values exist
+    valid = actual.notna() & predicted.notna()
+
+    # Normal case: actual is not zero
+    nonzero_actual = valid & actual.ne(0)
+
+    probability.loc[nonzero_actual] = (
+        1
+        - (
+            predicted.loc[nonzero_actual]
+            - actual.loc[nonzero_actual]
+        ).abs()
+        / actual.loc[nonzero_actual].abs()
+    ).clip(lower=0, upper=1)
+
+    # Special case: actual = 0
+    zero_actual = valid & actual.eq(0)
+
+    probability.loc[zero_actual] = (
+        predicted.loc[zero_actual]
+        .eq(0)
+        .astype("float64")
+    )
+
+    return probability
 
 
 def _growth_percentage(week_1: pd.Series, week_2: pd.Series) -> pd.Series:

@@ -278,44 +278,179 @@ def _absolute_percentage_error(actual: Iterable[float], predicted: Iterable[floa
     error = (predicted_series - actual_series).abs() / denominator
     return error.mask(denominator.isna(), predicted_series.ne(actual_series).astype(float))
 
+def build_confidence_table(
+    actual: Iterable[float],
+    predicted: Iterable[float],
+    *,
+    bins: int = 10,
+    min_bin_rows: int = 10,
+) -> dict[str, Any]:
+    """
+    Build prediction-specific confidence bands from validation data.
 
-def build_confidence_table(actual: Iterable[float], predicted: Iterable[float], *, bins: int = 5) -> dict[str, Any]:
-    actual_series = pd.Series(actual, dtype="float64").reset_index(drop=True)
-    predicted_series = pd.Series(predicted, dtype="float64").reset_index(drop=True)
-    error = _absolute_percentage_error(actual_series, predicted_series)
-    valid = pd.DataFrame({"actual": actual_series, "predicted": predicted_series, "error": error}).dropna()
-    fallback = _confidence_from_wape(regression_metrics(actual_series, predicted_series)["WAPE"])
+    Confidence means:
+        1.00 = historically very accurate predictions in this range
+        0.80 = median historical error was approximately 20%
+        0.50 = median historical error was approximately 50%
+        0.00 = historically very unreliable
+
+    The table is learned ONLY from validation data. It does not use
+    future actual values when scoring new games.
+    """
+
+    actual_series = pd.to_numeric(
+        pd.Series(actual).reset_index(drop=True),
+        errors="coerce",
+    ).astype("float64")
+
+    predicted_series = pd.to_numeric(
+        pd.Series(predicted).reset_index(drop=True),
+        errors="coerce",
+    ).astype("float64")
+
+    error = _absolute_percentage_error(
+        actual_series,
+        predicted_series,
+    )
+
+    valid = pd.DataFrame(
+        {
+            "actual": actual_series,
+            "predicted": predicted_series,
+            "error": error,
+        }
+    ).replace([np.inf, -np.inf], np.nan)
+
+    valid = valid.dropna(
+        subset=["actual", "predicted", "error"]
+    )
+
+    # Global fallback confidence.
+    metrics = regression_metrics(
+        actual_series.dropna(),
+        predicted_series.loc[actual_series.notna()],
+    )
+
+    fallback = _confidence_from_wape(
+        metrics["WAPE"]
+    )
+
     if valid.empty:
-        return {"fallback": fallback, "bins": []}
+        return {
+            "fallback": fallback,
+            "bins": [],
+        }
+
+    # ---------------------------------------------------------
+    # Determine how many bins are sensible.
+    #
+    # We do not want tiny bins containing only one or two games.
+    # ---------------------------------------------------------
+    max_bins_from_rows = max(
+        1,
+        len(valid) // max(1, min_bin_rows),
+    )
+
+    number_of_bins = min(
+        bins,
+        max_bins_from_rows,
+        valid["predicted"].nunique(),
+    )
+
+    number_of_bins = max(
+        1,
+        int(number_of_bins),
+    )
 
     try:
-        groups = pd.qcut(valid["predicted"], q=min(bins, len(valid)), duplicates="drop")
+        groups = pd.qcut(
+            valid["predicted"],
+            q=number_of_bins,
+            duplicates="drop",
+        )
+
     except ValueError:
         groups = None
 
     rows: list[dict[str, float]] = []
+
     if groups is not None:
-        for _, group in valid.groupby(groups, observed=True):
+
+        grouped = valid.groupby(
+            groups,
+            observed=True,
+        )
+
+        for _, group in grouped:
+
             if group.empty:
                 continue
+
+            median_error = float(
+                group["error"].median()
+            )
+
+            confidence = float(
+                np.clip(
+                    1 - median_error,
+                    0,
+                    1,
+                )
+            )
+
             rows.append(
                 {
-                    "min_pred": float(group["predicted"].min()),
-                    "max_pred": float(group["predicted"].max()),
-                    "confidence": float(np.clip(1 - group["error"].median(), 0, 1)),
+                    "min_pred": float(
+                        group["predicted"].min()
+                    ),
+                    "max_pred": float(
+                        group["predicted"].max()
+                    ),
+                    "confidence": confidence,
+                    "rows": int(len(group)),
+                    "median_error": median_error,
                 }
             )
 
+    # ---------------------------------------------------------
+    # Fallback if qcut cannot create useful groups.
+    # ---------------------------------------------------------
     if not rows:
+
+        median_error = float(
+            valid["error"].median()
+        )
+
         rows.append(
             {
-                "min_pred": float(valid["predicted"].min()),
-                "max_pred": float(valid["predicted"].max()),
-                "confidence": fallback,
+                "min_pred": float(
+                    valid["predicted"].min()
+                ),
+                "max_pred": float(
+                    valid["predicted"].max()
+                ),
+                "confidence": float(
+                    np.clip(
+                        1 - median_error,
+                        0,
+                        1,
+                    )
+                ),
+                "rows": int(len(valid)),
+                "median_error": median_error,
             }
         )
 
-    return {"fallback": fallback, "bins": rows}
+    # Ensure bins are sorted.
+    rows = sorted(
+        rows,
+        key=lambda row: row["min_pred"],
+    )
+
+    return {
+        "fallback": fallback,
+        "bins": rows,
+    }
 
 
 def confidence_from_prediction(
@@ -323,19 +458,138 @@ def confidence_from_prediction(
     table: dict[str, Any] | None,
     observation_coverage: Iterable[float] | None = None,
 ) -> np.ndarray:
-    predicted_series = pd.Series(predicted, dtype="float64").reset_index(drop=True)
-    fallback = np.nan if not table else table.get("fallback", np.nan)
-    result = pd.Series(fallback, index=predicted_series.index, dtype="float64")
-    for row in (table or {}).get("bins", []):
-        lower = row.get("min_pred", -np.inf)
-        upper = row.get("max_pred", np.inf)
-        mask = predicted_series.between(lower, upper, inclusive="both")
-        result.loc[mask] = row.get("confidence", fallback)
-    if observation_coverage is not None:
-        coverage = pd.Series(observation_coverage, dtype="float64").reset_index(drop=True).clip(lower=0, upper=1)
-        result = result * coverage.fillna(1)
-    return result.clip(lower=0, upper=1).to_numpy()
+    """
+    Assign confidence to each individual prediction.
 
+    The confidence comes from the validation prediction range that the
+    forecast falls into.
+
+    Observation coverage is then applied as a reliability adjustment.
+
+    Example:
+        learned confidence = 0.80
+        observation coverage = 0.75
+
+        final confidence = 0.60
+    """
+
+    predicted_series = pd.to_numeric(
+        pd.Series(predicted).reset_index(drop=True),
+        errors="coerce",
+    ).astype("float64")
+
+    fallback = (
+        np.nan
+        if not table
+        else table.get("fallback", np.nan)
+    )
+
+    result = pd.Series(
+        fallback,
+        index=predicted_series.index,
+        dtype="float64",
+    )
+
+    bins = (
+        []
+        if not table
+        else table.get("bins", [])
+    )
+
+    # ---------------------------------------------------------
+    # Assign confidence from prediction bands.
+    # ---------------------------------------------------------
+    for row in bins:
+
+        lower = float(
+            row.get(
+                "min_pred",
+                -np.inf,
+            )
+        )
+
+        upper = float(
+            row.get(
+                "max_pred",
+                np.inf,
+            )
+        )
+
+        confidence = row.get(
+            "confidence",
+            fallback,
+        )
+
+        mask = predicted_series.between(
+            lower,
+            upper,
+            inclusive="both",
+        )
+
+        result.loc[mask] = confidence
+
+    # ---------------------------------------------------------
+    # Predictions outside the validation range.
+    #
+    # Use the nearest confidence band instead of immediately
+    # falling back to global WAPE.
+    # ---------------------------------------------------------
+    if bins:
+
+        ordered_bins = sorted(
+            bins,
+            key=lambda row: row["min_pred"],
+        )
+
+        first_bin = ordered_bins[0]
+        last_bin = ordered_bins[-1]
+
+        below = (
+            predicted_series
+            < float(first_bin["min_pred"])
+        )
+
+        above = (
+            predicted_series
+            > float(last_bin["max_pred"])
+        )
+
+        result.loc[below] = first_bin[
+            "confidence"
+        ]
+
+        result.loc[above] = last_bin[
+            "confidence"
+        ]
+
+    # ---------------------------------------------------------
+    # Observation coverage adjustment.
+    # ---------------------------------------------------------
+    if observation_coverage is not None:
+
+        coverage = pd.to_numeric(
+            pd.Series(
+                observation_coverage
+            ).reset_index(drop=True),
+            errors="coerce",
+        ).astype("float64")
+
+        coverage = coverage.clip(
+            lower=0,
+            upper=1,
+        )
+
+        # Missing coverage should not destroy an otherwise valid
+        # confidence estimate.
+        coverage = coverage.fillna(1.0)
+
+        result = result * coverage
+
+    return (
+        result
+        .clip(lower=0, upper=1)
+        .to_numpy(dtype="float64")
+    )
 
 def _baseline_prediction(frame: pd.DataFrame, target: str) -> np.ndarray:
     short = target.replace("target_", "")
@@ -813,11 +1067,19 @@ def train_model_family(
 
             prediction = blend_weight * model_prediction + (1 - blend_weight) * baseline
             metrics = regression_metrics(holdout_target[target], prediction)
+            
             metric_confidence = _confidence_from_wape(metrics["WAPE"])
             if pd.isna(metric_confidence):
                 metric_confidence = confidence_table.get("fallback", np.nan)
             confidence_table["fallback"] = metric_confidence
-            confidence = np.full(len(holdout_target), metric_confidence, dtype="float64")
+
+            confidence = confidence_from_prediction(
+                prediction,
+                confidence_table,
+                holdout_target.get(
+                    "observation_coverage"
+                )
+            )
 
             evaluations.append(
                 {

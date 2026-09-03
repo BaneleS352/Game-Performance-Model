@@ -10,6 +10,7 @@ from .features import (
     build_four_week_snapshot,
     prepare_features,
 )
+
 from .modeling import (
     _baseline_prediction,
     _prediction_from_fit,
@@ -18,10 +19,24 @@ from .modeling import (
 )
 
 
-def assign_merchandising_recommendation(row: pd.Series) -> str:
-    probability = row.get("probability_high_performance", np.nan)
-    predicted_clients = row.get("predicted_clients_week_4", np.nan)
-    predicted_stakes = row.get("predicted_stakes_week_4", np.nan)
+def assign_merchandising_recommendation(
+    row: pd.Series,
+) -> str:
+
+    probability = row.get(
+        "probability_high_performance",
+        np.nan,
+    )
+
+    predicted_clients = row.get(
+        "predicted_clients_week_4",
+        np.nan,
+    )
+
+    predicted_stakes = row.get(
+        "predicted_stakes_week_4",
+        np.nan,
+    )
 
     has_positive_activity = (
         pd.notna(predicted_clients)
@@ -29,110 +44,489 @@ def assign_merchandising_recommendation(row: pd.Series) -> str:
         and predicted_clients > 0
         and predicted_stakes > 0
     )
-    if pd.notna(probability) and probability >= 0.80 and has_positive_activity:
+
+    if (
+        pd.notna(probability)
+        and probability >= 0.80
+        and has_positive_activity
+    ):
         return "Priority placement for week 4"
-    if pd.notna(probability) and probability >= 0.60 and pd.notna(predicted_stakes) and predicted_stakes > 0:
+
+    if (
+        pd.notna(probability)
+        and probability >= 0.60
+        and pd.notna(predicted_stakes)
+        and predicted_stakes > 0
+    ):
         return "Increase visibility for week 4"
-    if pd.notna(probability) and probability >= 0.40:
+
+    if (
+        pd.notna(probability)
+        and probability >= 0.40
+    ):
         return "Standard placement with monitoring"
-    if pd.notna(predicted_stakes) and predicted_stakes <= 0:
+
+    if (
+        pd.notna(predicted_stakes)
+        and predicted_stakes <= 0
+    ):
         return "Do not promote; review low stakes forecast"
+
     return "Standard catalogue placement"
 
 
-def score_snapshot(snapshot: pd.DataFrame, model_bundle: dict) -> pd.DataFrame:
+def score_snapshot(
+    snapshot: pd.DataFrame,
+    model_bundle: dict,
+) -> pd.DataFrame:
+
     if snapshot.empty:
         return snapshot.copy()
-    categorical = model_bundle["categorical_features"]
-    x = prepare_features(snapshot, categorical)
-    cols = ["Game_ID", "TournamentName", "SystemName", "First_Observed_Date",
-            "Lifecycle_Stage", "Obs_Window", "Horizon", "active_observation_days", "observation_coverage"]
+
+    categorical = model_bundle[
+        "categorical_features"
+    ]
+
+    x = prepare_features(
+        snapshot,
+        categorical,
+    )
+
+    cols = [
+        "Game_ID",
+        "TournamentName",
+        "SystemName",
+        "First_Observed_Date",
+        "Lifecycle_Stage",
+        "Obs_Window",
+        "Horizon",
+        "active_observation_days",
+        "observation_coverage",
+    ]
+
     result = snapshot[cols].copy()
-    for target, model in model_bundle["regressors"].items():
+
+    # =========================================================
+    # REGRESSION FORECASTS
+    # =========================================================
+
+    for target, model in model_bundle[
+        "regressors"
+    ].items():
+
         if target not in REGRESSION_TARGETS:
             continue
-        short = target.replace("target_", "")
+
+        short = target.replace(
+            "target_",
+            "",
+        )
+
         transform = (
-            model_bundle.get("target_transforms", {}).get(target)
-            or model_bundle.get("regression_target_transforms", {}).get(target, "raw")
-        )
-        model_pred = _prediction_from_fit(target, model.predict(x), transform)
-        baseline_pred = _baseline_prediction(snapshot, target)
-        blend_weight = model_bundle.get("blend_weights", {}).get(target, 1.0)
-        pred = blend_weight * model_pred + (1 - blend_weight) * baseline_pred
-        result[f"predicted_{short}_week_4"] = pred
-        metric_confidence = model_bundle.get("confidence_scores", {}).get(target)
-        confidence_table = model_bundle.get("confidence_tables", {}).get(target)
-        if confidence_table and confidence_table.get("bins"):
-            result[f"confidence_{short}"] = confidence_from_prediction(
-                pred,
-                confidence_table,
-                snapshot.get("observation_coverage"),
+            model_bundle
+            .get(
+                "target_transforms",
+                {},
             )
-        elif metric_confidence is not None and pd.notna(metric_confidence):
-            result[f"confidence_{short}"] = float(metric_confidence)
-        else:
-            result[f"confidence_{short}"] = confidence_from_prediction(
-                pred,
-                confidence_table,
-                snapshot.get("observation_coverage"),
+            .get(target)
+            or model_bundle
+            .get(
+                "regression_target_transforms",
+                {},
+            )
+            .get(
+                target,
+                "raw",
+            )
+        )
+
+        # -----------------------------------------------------
+        # Model prediction
+        # -----------------------------------------------------
+
+        model_pred = _prediction_from_fit(
+            target,
+            model.predict(x),
+            transform,
+        )
+
+        # -----------------------------------------------------
+        # Baseline prediction
+        # -----------------------------------------------------
+
+        baseline_pred = _baseline_prediction(
+            snapshot,
+            target,
+        )
+
+        # -----------------------------------------------------
+        # Blend model + baseline
+        # -----------------------------------------------------
+
+        blend_weight = (
+            model_bundle
+            .get(
+                "blend_weights",
+                {},
+            )
+            .get(
+                target,
+                1.0,
+            )
+        )
+
+        pred = (
+            blend_weight * model_pred
+            + (1 - blend_weight)
+            * baseline_pred
+        )
+
+        result[
+            f"predicted_{short}_week_4"
+        ] = pred
+
+        # =====================================================
+        # GAME-SPECIFIC CONFIDENCE
+        # =====================================================
+
+        confidence_table = (
+            model_bundle
+            .get(
+                "confidence_tables",
+                {},
+            )
+            .get(target)
+        )
+
+        metric_confidence = (
+            model_bundle
+            .get(
+                "confidence_scores",
+                {},
+            )
+            .get(target)
+        )
+
+        # If an older model bundle does not contain a proper
+        # confidence table, construct a fallback-only table.
+        if not confidence_table:
+
+            confidence_table = {
+                "fallback": metric_confidence,
+                "bins": [],
+            }
+
+        elif (
+            pd.isna(
+                confidence_table.get(
+                    "fallback",
+                    np.nan,
+                )
+            )
+            and metric_confidence is not None
+        ):
+
+            confidence_table = (
+                confidence_table.copy()
             )
 
-    classifier = model_bundle.get("classifier")
+            confidence_table[
+                "fallback"
+            ] = metric_confidence
+
+        # IMPORTANT:
+        #
+        # Always call confidence_from_prediction().
+        #
+        # Do NOT directly assign metric_confidence to every row.
+        result[
+            f"confidence_{short}"
+        ] = confidence_from_prediction(
+            pred,
+            confidence_table,
+            snapshot.get(
+                "observation_coverage"
+            ),
+        )
+
+    # =========================================================
+    # HIGH-PERFORMER CLASSIFIER
+    # =========================================================
+
+    classifier = model_bundle.get(
+        "classifier"
+    )
+
     if classifier is not None:
-        raw_probability = classifier.predict_proba(x)[:, 1]
-        result["raw_probability_high_performance"] = raw_probability
-        result["probability_high_performance"] = apply_probability_calibration(
-            raw_probability,
-            model_bundle.get("probability_calibrator"),
-        )
-        threshold = float(model_bundle.get("classification_threshold", 0.50))
-        result["classification_threshold"] = threshold
-        result["predicted_high_performer"] = (result["probability_high_performance"] >= threshold).astype(int)
 
-    result["recommendation"] = result.apply(assign_merchandising_recommendation, axis=1)
-    result["scored_at"] = pd.Timestamp.now(tz="UTC")
+        raw_probability = (
+            classifier.predict_proba(x)[:, 1]
+        )
+
+        result[
+            "raw_probability_high_performance"
+        ] = raw_probability
+
+        result[
+            "probability_high_performance"
+        ] = apply_probability_calibration(
+            raw_probability,
+            model_bundle.get(
+                "probability_calibrator"
+            ),
+        )
+
+        threshold = float(
+            model_bundle.get(
+                "classification_threshold",
+                0.50,
+            )
+        )
+
+        result[
+            "classification_threshold"
+        ] = threshold
+
+        result[
+            "predicted_high_performer"
+        ] = (
+            result[
+                "probability_high_performance"
+            ]
+            >= threshold
+        ).astype(int)
+
+    # =========================================================
+    # BUSINESS RECOMMENDATION
+    # =========================================================
+
+    result[
+        "recommendation"
+    ] = result.apply(
+        assign_merchandising_recommendation,
+        axis=1,
+    )
+
+    result[
+        "scored_at"
+    ] = pd.Timestamp.now(
+        tz="UTC"
+    )
+
     return result
 
 
-def eligible_checkpoint_for_age(age: float, checkpoints: list[int], exact_checkpoint_only: bool = True):
-    if pd.isna(age): return None
+def eligible_checkpoint_for_age(
+    age: float,
+    checkpoints: list[int],
+    exact_checkpoint_only: bool = True,
+):
+
+    if pd.isna(age):
+        return None
+
     age = int(age)
-    if exact_checkpoint_only: return age if age in checkpoints else None
-    eligible = [c for c in checkpoints if c <= age]
-    return max(eligible) if eligible else None
 
+    if exact_checkpoint_only:
+        return (
+            age
+            if age in checkpoints
+            else None
+        )
 
-def run_daily_lifecycle_scoring(data, model_bundles, horizon_strategy, *, as_of_date=None,
-                                scoring_log=None, exact_checkpoint_only=True):
-    as_of_date = pd.Timestamp(data["Date"].max() if as_of_date is None else as_of_date).normalize()
-    history = data[data["Date"] <= as_of_date].copy()
-    scoring_log = pd.DataFrame() if scoring_log is None else scoring_log.copy()
-    status = history.groupby("Game_ID", as_index=False).agg(Current_Age=("Days_Since_First_Observed", "max"))
-    status = status[status["Current_Age"] >= OBSERVATION_WINDOW_DAYS].copy()
-    status["Checkpoint"] = OBSERVATION_WINDOW_DAYS
-    new_scores = []
-    already = set()
-    if not scoring_log.empty and {"Game_ID", "Checkpoint", "Horizon"}.issubset(scoring_log.columns):
-        already = set(zip(scoring_log["Game_ID"], scoring_log["Checkpoint"], scoring_log["Horizon"]))
-    checkpoint = OBSERVATION_WINDOW_DAYS
-    horizon = PREDICTION_WEEK_END - OBSERVATION_WINDOW_DAYS
-    model_bundle = model_bundles.get((checkpoint, horizon))
-    if model_bundle is None:
-        return pd.DataFrame(), scoring_log
-    game_ids = status["Game_ID"].tolist()
-    eligible_ids = [g for g in game_ids if (g, checkpoint, horizon) not in already]
-    if eligible_ids:
-        snapshot = build_four_week_snapshot(history[history["Game_ID"].isin(eligible_ids)], require_future=False)
-        scores = score_snapshot(snapshot, model_bundle)
-        scores["Checkpoint"] = checkpoint
-        scores["Horizon"] = horizon
-        scores["As_Of_Date"] = as_of_date
-        new_scores.append(scores)
-    if not new_scores: return pd.DataFrame(), scoring_log
-    predictions = pd.concat(new_scores, ignore_index=True)
-    log_addition = predictions[["Game_ID", "Checkpoint", "Horizon", "As_Of_Date", "scored_at"]]
-    updated = pd.concat([scoring_log, log_addition], ignore_index=True).drop_duplicates(
-        ["Game_ID", "Checkpoint", "Horizon"], keep="last"
+    eligible = [
+        checkpoint
+        for checkpoint in checkpoints
+        if checkpoint <= age
+    ]
+
+    return (
+        max(eligible)
+        if eligible
+        else None
     )
-    return predictions, updated
+
+
+def run_daily_lifecycle_scoring(
+    data,
+    model_bundles,
+    horizon_strategy,
+    *,
+    as_of_date=None,
+    scoring_log=None,
+    exact_checkpoint_only=True,
+):
+
+    as_of_date = pd.Timestamp(
+        data["Date"].max()
+        if as_of_date is None
+        else as_of_date
+    ).normalize()
+
+    history = data[
+        data["Date"] <= as_of_date
+    ].copy()
+
+    scoring_log = (
+        pd.DataFrame()
+        if scoring_log is None
+        else scoring_log.copy()
+    )
+
+    status = (
+        history
+        .groupby(
+            "Game_ID",
+            as_index=False,
+        )
+        .agg(
+            Current_Age=(
+                "Days_Since_First_Observed",
+                "max",
+            )
+        )
+    )
+
+    status = status[
+        status["Current_Age"]
+        >= OBSERVATION_WINDOW_DAYS
+    ].copy()
+
+    status[
+        "Checkpoint"
+    ] = OBSERVATION_WINDOW_DAYS
+
+    new_scores = []
+
+    already = set()
+
+    if (
+        not scoring_log.empty
+        and {
+            "Game_ID",
+            "Checkpoint",
+            "Horizon",
+        }.issubset(
+            scoring_log.columns
+        )
+    ):
+
+        already = set(
+            zip(
+                scoring_log["Game_ID"],
+                scoring_log["Checkpoint"],
+                scoring_log["Horizon"],
+            )
+        )
+
+    checkpoint = (
+        OBSERVATION_WINDOW_DAYS
+    )
+
+    horizon = (
+        PREDICTION_WEEK_END
+        - OBSERVATION_WINDOW_DAYS
+    )
+
+    model_bundle = model_bundles.get(
+        (
+            checkpoint,
+            horizon,
+        )
+    )
+
+    if model_bundle is None:
+        return (
+            pd.DataFrame(),
+            scoring_log,
+        )
+
+    game_ids = status[
+        "Game_ID"
+    ].tolist()
+
+    eligible_ids = [
+        game_id
+        for game_id in game_ids
+        if (
+            game_id,
+            checkpoint,
+            horizon,
+        )
+        not in already
+    ]
+
+    if eligible_ids:
+
+        snapshot = build_four_week_snapshot(
+            history[
+                history[
+                    "Game_ID"
+                ].isin(
+                    eligible_ids
+                )
+            ],
+            require_future=False,
+        )
+
+        scores = score_snapshot(
+            snapshot,
+            model_bundle,
+        )
+
+        scores[
+            "Checkpoint"
+        ] = checkpoint
+
+        scores[
+            "Horizon"
+        ] = horizon
+
+        scores[
+            "As_Of_Date"
+        ] = as_of_date
+
+        new_scores.append(
+            scores
+        )
+
+    if not new_scores:
+        return (
+            pd.DataFrame(),
+            scoring_log,
+        )
+
+    predictions = pd.concat(
+        new_scores,
+        ignore_index=True,
+    )
+
+    log_addition = predictions[
+        [
+            "Game_ID",
+            "Checkpoint",
+            "Horizon",
+            "As_Of_Date",
+            "scored_at",
+        ]
+    ]
+
+    updated = pd.concat(
+        [
+            scoring_log,
+            log_addition,
+        ],
+        ignore_index=True,
+    ).drop_duplicates(
+        [
+            "Game_ID",
+            "Checkpoint",
+            "Horizon",
+        ],
+        keep="last",
+    )
+
+    return (
+        predictions,
+        updated,
+    )
