@@ -4,10 +4,10 @@ import numpy as np
 import pandas as pd
 
 from .features import (
-    OBSERVATION_WINDOW_DAYS,
     PREDICTION_WEEK_END,
     REGRESSION_TARGETS,
-    build_four_week_snapshot,
+    build_lifecycle_snapshot,
+    build_week4_snapshot,
     prepare_features,
 )
 
@@ -16,6 +16,7 @@ from .modeling import (
     _prediction_from_fit,
     apply_probability_calibration,
     confidence_from_prediction,
+    prediction_interval_from_table,
 )
 
 
@@ -185,6 +186,24 @@ def score_snapshot(
             f"predicted_{short}_week_4"
         ] = pred
 
+        prediction_low, prediction_high = prediction_interval_from_table(
+            pred,
+            model_bundle
+            .get(
+                "prediction_interval_tables",
+                {},
+            )
+            .get(target),
+        )
+
+        result[
+            f"predicted_{short}_week_4_low"
+        ] = prediction_low
+
+        result[
+            f"predicted_{short}_week_4_high"
+        ] = prediction_high
+
         # =====================================================
         # GAME-SPECIFIC CONFIDENCE
         # =====================================================
@@ -253,47 +272,51 @@ def score_snapshot(
     # HIGH-PERFORMER CLASSIFIER
     # =========================================================
 
-    classifier = model_bundle.get(
-        "classifier"
-    )
+    classifiers = model_bundle.get("classifiers", {})
+    if not classifiers and model_bundle.get("classifier") is not None:
+        classifiers = {"performance": model_bundle["classifier"]}
 
-    if classifier is not None:
-
-        raw_probability = (
-            classifier.predict_proba(x)[:, 1]
+    for goal, classifier in classifiers.items():
+        raw_probability = classifier.predict_proba(x)[:, 1]
+        calibrator = (
+            model_bundle
+            .get("probability_calibrators", {})
+            .get(goal, model_bundle.get("probability_calibrator"))
         )
-
-        result[
-            "raw_probability_high_performance"
-        ] = raw_probability
-
-        result[
-            "probability_high_performance"
-        ] = apply_probability_calibration(
-            raw_probability,
-            model_bundle.get(
-                "probability_calibrator"
-            ),
-        )
-
+        probability = apply_probability_calibration(raw_probability, calibrator)
         threshold = float(
-            model_bundle.get(
-                "classification_threshold",
-                0.50,
-            )
+            model_bundle
+            .get("classification_thresholds", {})
+            .get(goal, model_bundle.get("classification_threshold", 0.50))
         )
 
-        result[
-            "classification_threshold"
-        ] = threshold
+        if goal == "performance":
+            raw_column = "raw_probability_high_performance"
+            probability_column = "probability_high_performance"
+            threshold_column = "classification_threshold"
+            predicted_column = "predicted_high_performer"
+        else:
+            raw_column = f"raw_probability_high_{goal}_performer"
+            probability_column = f"probability_high_{goal}_performer"
+            threshold_column = f"classification_threshold_high_{goal}_performer"
+            predicted_column = f"predicted_high_{goal}_performer"
 
-        result[
-            "predicted_high_performer"
-        ] = (
-            result[
-                "probability_high_performance"
-            ]
-            >= threshold
+        result[raw_column] = raw_probability
+        result[probability_column] = probability
+        result[threshold_column] = threshold
+        result[predicted_column] = (probability >= threshold).astype(int)
+
+    if {"probability_high_client_performer", "probability_high_stakes_performer"}.issubset(result.columns):
+        result["probability_high_performance"] = result[
+            ["probability_high_client_performer", "probability_high_stakes_performer"]
+        ].min(axis=1)
+        result["raw_probability_high_performance"] = result[
+            ["raw_probability_high_client_performer", "raw_probability_high_stakes_performer"]
+        ].min(axis=1)
+        result["classification_threshold"] = float(model_bundle.get("classification_threshold", 0.50))
+        result["predicted_high_performer"] = (
+            result["predicted_high_client_performer"].eq(1)
+            & result["predicted_high_stakes_performer"].eq(1)
         ).astype(int)
 
     # =========================================================
@@ -387,15 +410,6 @@ def run_daily_lifecycle_scoring(
         )
     )
 
-    status = status[
-        status["Current_Age"]
-        >= OBSERVATION_WINDOW_DAYS
-    ].copy()
-
-    status[
-        "Checkpoint"
-    ] = OBSERVATION_WINDOW_DAYS
-
     new_scores = []
 
     already = set()
@@ -419,76 +433,53 @@ def run_daily_lifecycle_scoring(
             )
         )
 
-    checkpoint = (
-        OBSERVATION_WINDOW_DAYS
-    )
+    configured = {
+        (checkpoint, horizon)
+        for checkpoint, horizons in horizon_strategy.items()
+        for horizon in horizons
+    }
 
-    horizon = (
-        PREDICTION_WEEK_END
-        - OBSERVATION_WINDOW_DAYS
-    )
+    for checkpoint, horizon in sorted(model_bundles):
+        if configured and (checkpoint, horizon) not in configured:
+            continue
 
-    model_bundle = model_bundles.get(
-        (
-            checkpoint,
-            horizon,
-        )
-    )
+        model_bundle = model_bundles.get((checkpoint, horizon))
+        if model_bundle is None:
+            continue
 
-    if model_bundle is None:
-        return (
-            pd.DataFrame(),
-            scoring_log,
-        )
+        eligible = status[status["Current_Age"] >= checkpoint].copy()
+        if exact_checkpoint_only:
+            eligible = eligible[eligible["Current_Age"] >= checkpoint]
 
-    game_ids = status[
-        "Game_ID"
-    ].tolist()
+        eligible_ids = [
+            game_id
+            for game_id in eligible["Game_ID"].tolist()
+            if (game_id, checkpoint, horizon) not in already
+        ]
 
-    eligible_ids = [
-        game_id
-        for game_id in game_ids
-        if (
-            game_id,
-            checkpoint,
-            horizon,
-        )
-        not in already
-    ]
+        if not eligible_ids:
+            continue
 
-    if eligible_ids:
+        scoring_data = history[history["Game_ID"].isin(eligible_ids)]
+        if checkpoint + horizon == PREDICTION_WEEK_END:
+            snapshot = build_week4_snapshot(
+                scoring_data,
+                checkpoint,
+                require_future=False,
+            )
+        else:
+            snapshot = build_lifecycle_snapshot(
+                scoring_data,
+                checkpoint,
+                horizon,
+                require_future=False,
+            )
 
-        snapshot = build_four_week_snapshot(
-            history[
-                history[
-                    "Game_ID"
-                ].isin(
-                    eligible_ids
-                )
-            ],
-            require_future=False,
-        )
-
-        scores = score_snapshot(
-            snapshot,
-            model_bundle,
-        )
-
-        scores[
-            "Checkpoint"
-        ] = checkpoint
-
-        scores[
-            "Horizon"
-        ] = horizon
-
-        scores[
-            "As_Of_Date"
-        ] = as_of_date
-
-        new_scores.append(
-            scores
-        )
+        scores = score_snapshot(snapshot, model_bundle)
+        scores["Checkpoint"] = checkpoint
+        scores["Horizon"] = horizon
+        scores["As_Of_Date"] = as_of_date
+        new_scores.append(scores)
 
     if not new_scores:
         return (

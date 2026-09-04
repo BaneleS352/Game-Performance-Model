@@ -22,6 +22,7 @@ class Settings:
 
     horizon_strategy: dict[int, list[int]] = field(default_factory=lambda: {
         14: [14],
+        21: [7],
     })
 
     def __post_init__(self) -> None:

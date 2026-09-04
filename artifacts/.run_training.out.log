@@ -1,0 +1,11 @@
+Training family day 14 -> horizon 14 [standard] ...
+Finished day 14 -> horizon 14 in 586.9s
+Training family day 21 -> horizon 7 [standard] ...
+Finished day 21 -> horizon 7 in 658.3s
+report=C:\Users\Banele\Documents\GitHub\Game-Performance-Model\artifacts\reports\model_business_report.xlsx
+dashboard=artifacts\dashboard\dashboard_data.json
+ Checkpoint  Horizon         Target Target_Transform Holdout_Start  Best_Iteration _target_transform  depth  learning_rate  l2_leaf_reg  random_strength  bagging_temperature           MAE         RMSE       R2     WAPE  Model_Blend_Weight  Baseline_MAE  Baseline_RMSE  Baseline_R2  Baseline_WAPE  WAPE_Improvement  Range_Coverage  Average_Range_Width
+         14       14 target_clients              raw    2026-06-08             244               raw      7           0.03            8              0.5                  1.0   3797.856905 4.119182e+04 0.390246 0.606508                 0.9  3.929954e+03   2.040959e+04     0.850307       0.627604          0.021096        0.783058          3636.748350
+         14       14  target_stakes              raw    2026-06-08             234               raw      6           0.04            6              1.0                  1.0 791194.383932 3.446503e+06 0.656162 0.521845                 1.0  1.225085e+06   5.185118e+06     0.221759       0.808024          0.286179        0.659091        860052.735839
+         21        7 target_clients              raw    2026-06-08             182               raw      6           0.04            6              1.0                  1.0   3094.364928 3.633470e+04 0.525566 0.494162                 0.9  3.838435e+03   4.415170e+04     0.299468       0.612988          0.118826        0.847107          2569.404301
+         21        7  target_stakes              raw    2026-06-08             316               raw      7           0.03            8              0.5                  1.0 651976.377778 4.265361e+06 0.473366 0.430021                 0.9  1.228688e+06   5.976432e+06    -0.033906       0.810401          0.380379        0.712810        675829.070086

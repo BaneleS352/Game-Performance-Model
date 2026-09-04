@@ -30,6 +30,10 @@ TrainingMode = Literal["quick", "standard", "production"]
 
 NON_NEGATIVE_TARGETS = {"target_clients", "target_stakes"}
 ProbabilityCalibrator = dict[str, Any]
+CLASSIFICATION_TARGETS = {
+    "client": "is_high_client_performer",
+    "stakes": "is_high_stakes_performer",
+}
 
 REGRESSOR_PARAMETER_CANDIDATES = [
     {"_target_transform": "raw", "depth": 5, "learning_rate": 0.05, "l2_leaf_reg": 5, "random_strength": 1.0, "bagging_temperature": 0.5},
@@ -59,7 +63,7 @@ TRAINING_BUDGETS: dict[TrainingMode, dict[str, int]] = {
         "regressor_iterations": 500,
         "classifier_iterations": 400,
         "early_stopping_rounds": 50,
-        "max_tuning_candidates": 2,
+        "max_tuning_candidates": 3,
         "max_families": 0,
     },
     # Full search budget. Use for the final training run, not for notebook debugging.
@@ -269,6 +273,84 @@ def _confidence_from_wape(wape: float) -> float:
     if pd.isna(wape):
         return np.nan
     return float(np.clip(1 - wape, 0, 1))
+
+
+def build_prediction_interval_table(
+    actual: Iterable[float],
+    predicted: Iterable[float],
+    *,
+    lower_quantile: float = 0.10,
+    upper_quantile: float = 0.90,
+    bins: int = 5,
+    min_bin_rows: int = 25,
+) -> dict[str, Any]:
+    actual_series = pd.to_numeric(pd.Series(actual), errors="coerce").astype("float64").reset_index(drop=True)
+    predicted_series = pd.to_numeric(pd.Series(predicted), errors="coerce").astype("float64").reset_index(drop=True)
+    valid = pd.DataFrame({"actual": actual_series, "predicted": predicted_series}).replace([np.inf, -np.inf], np.nan).dropna()
+    if valid.empty:
+        return {"lower_residual": 0.0, "upper_residual": 0.0, "bins": []}
+
+    residual = valid["actual"] - valid["predicted"]
+    table: dict[str, Any] = {
+        "lower_residual": float(residual.quantile(lower_quantile)),
+        "upper_residual": float(residual.quantile(upper_quantile)),
+        "bins": [],
+    }
+
+    number_of_bins = min(bins, len(valid) // max(1, min_bin_rows), valid["predicted"].nunique())
+    if number_of_bins < 2:
+        return table
+
+    try:
+        groups = pd.qcut(valid["predicted"], q=int(number_of_bins), duplicates="drop")
+    except ValueError:
+        return table
+
+    for _, group in valid.groupby(groups, observed=True):
+        group_residual = group["actual"] - group["predicted"]
+        table["bins"].append(
+            {
+                "min_pred": float(group["predicted"].min()),
+                "max_pred": float(group["predicted"].max()),
+                "lower_residual": float(group_residual.quantile(lower_quantile)),
+                "upper_residual": float(group_residual.quantile(upper_quantile)),
+                "rows": int(len(group)),
+            }
+        )
+    return table
+
+
+def prediction_interval_from_table(
+    predicted: Iterable[float],
+    table: dict[str, float] | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    prediction = np.asarray(predicted, dtype="float64")
+    table = table or {}
+    lower_residual = np.full(len(prediction), float(table.get("lower_residual", 0.0)))
+    upper_residual = np.full(len(prediction), float(table.get("upper_residual", 0.0)))
+    bands = table.get("bins", [])
+    assigned = np.zeros(len(prediction), dtype=bool)
+
+    for band in bands:
+        minimum = float(band["min_pred"])
+        maximum = float(band["max_pred"])
+        mask = (prediction >= minimum) & (prediction <= maximum)
+        lower_residual[mask] = float(band["lower_residual"])
+        upper_residual[mask] = float(band["upper_residual"])
+        assigned |= mask
+
+    if bands and (~assigned).any():
+        centers = np.asarray([(float(band["min_pred"]) + float(band["max_pred"])) / 2 for band in bands])
+        nearest = np.abs(prediction[~assigned, None] - centers).argmin(axis=1)
+        unassigned = np.flatnonzero(~assigned)
+        lower_residual[unassigned] = [float(bands[index]["lower_residual"]) for index in nearest]
+        upper_residual[unassigned] = [float(bands[index]["upper_residual"]) for index in nearest]
+
+    low = prediction + lower_residual
+    high = prediction + upper_residual
+    low = np.minimum(low, prediction)
+    high = np.maximum(high, prediction)
+    return np.maximum(low, 0), np.maximum(high, 0)
 
 
 def _absolute_percentage_error(actual: Iterable[float], predicted: Iterable[float]) -> pd.Series:
@@ -593,8 +675,17 @@ def confidence_from_prediction(
 
 def _baseline_prediction(frame: pd.DataFrame, target: str) -> np.ndarray:
     short = target.replace("target_", "")
+    week_3_column = f"{short}_week_3_sum"
     week_2_column = f"{short}_week_2_sum"
     week_1_column = f"{short}_week_1_sum"
+    if week_3_column in frame.columns and week_2_column in frame.columns:
+        week_2 = pd.to_numeric(frame[week_2_column], errors="coerce").fillna(0)
+        week_3 = pd.to_numeric(frame[week_3_column], errors="coerce")
+        has_week_3 = week_3.notna()
+        growth = ((week_3 - week_2) / week_2.abs().replace(0, np.nan)).clip(lower=-0.5, upper=1.0).fillna(0)
+        prediction = np.maximum((week_3.fillna(0) * (1 + growth)).to_numpy(dtype="float64"), 0)
+        if has_week_3.any():
+            return prediction
     if week_2_column in frame.columns and week_1_column in frame.columns:
         week_1 = pd.to_numeric(frame[week_1_column], errors="coerce").fillna(0)
         week_2 = pd.to_numeric(frame[week_2_column], errors="coerce").fillna(0)
@@ -702,13 +793,19 @@ def _classification_diagnostics(
     }
 
 
-def _build_regressor(params: dict[str, Any], settings: Settings, mode: TrainingMode | None = None) -> CatBoostRegressor:
+def _build_regressor(
+    params: dict[str, Any],
+    settings: Settings,
+    mode: TrainingMode | None = None,
+    *,
+    iterations: int | None = None,
+) -> CatBoostRegressor:
     budget = _budget(settings, mode)
     transform = params.get("_target_transform", "raw")
     return CatBoostRegressor(
         loss_function="RMSE" if _is_log_transform(transform) else "MAE",
         eval_metric="RMSE" if _is_log_transform(transform) else "MAE",
-        iterations=int(_setting(settings, "regressor_iterations", budget["regressor_iterations"])),
+        iterations=iterations or int(_setting(settings, "regressor_iterations", budget["regressor_iterations"])),
         random_seed=settings.random_seed,
         verbose=_fit_verbose(settings),
         allow_writing_files=False,
@@ -718,12 +815,18 @@ def _build_regressor(params: dict[str, Any], settings: Settings, mode: TrainingM
     )
 
 
-def _build_classifier(params: dict[str, Any], settings: Settings, mode: TrainingMode | None = None) -> CatBoostClassifier:
+def _build_classifier(
+    params: dict[str, Any],
+    settings: Settings,
+    mode: TrainingMode | None = None,
+    *,
+    iterations: int | None = None,
+) -> CatBoostClassifier:
     budget = _budget(settings, mode)
     return CatBoostClassifier(
         loss_function="Logloss",
         eval_metric="AUC",
-        iterations=int(_setting(settings, "classifier_iterations", budget["classifier_iterations"])),
+        iterations=iterations or int(_setting(settings, "classifier_iterations", budget["classifier_iterations"])),
         random_seed=settings.random_seed,
         verbose=_fit_verbose(settings),
         allow_writing_files=False,
@@ -767,18 +870,27 @@ def _fit_classifier(
     categorical: list[str],
     settings: Settings,
     mode: TrainingMode | None = None,
+    target_column: str = "is_high_performer",
 ) -> CatBoostClassifier:
     budget = _budget(settings, mode)
     fit_kwargs: dict[str, Any] = {"cat_features": categorical}
-    if validation is not None and not validation.empty and validation["is_high_performer"].nunique() >= 2:
-        fit_kwargs["eval_set"] = (prepare_features(validation, categorical), validation["is_high_performer"])
+    if validation is not None and not validation.empty and validation[target_column].nunique() >= 2:
+        fit_kwargs["eval_set"] = (prepare_features(validation, categorical), validation[target_column])
         fit_kwargs["early_stopping_rounds"] = int(
             _setting(settings, "early_stopping_rounds", budget["early_stopping_rounds"])
         )
         fit_kwargs["use_best_model"] = True
 
-    model.fit(prepare_features(train, categorical), train["is_high_performer"], **fit_kwargs)
+    model.fit(prepare_features(train, categorical), train[target_column], **fit_kwargs)
     return model
+
+
+def _fitted_iterations(model: Any, fallback: int) -> int:
+    best = model.get_best_iteration()
+    trees = int(getattr(model, "tree_count_", 0) or 0)
+    if best is not None and best >= 0 and (not trees or trees <= int(best) + 1):
+        return int(best) + 1
+    return trees or fallback
 
 
 def _adaptive_rolling_date_splits(development: pd.DataFrame, settings: Settings) -> list[tuple[pd.DataFrame, pd.DataFrame]]:
@@ -865,12 +977,13 @@ def tune_classifier(
     categorical: list[str],
     settings: Settings,
     mode: TrainingMode | None = None,
+    target_column: str = "is_high_performer",
 ) -> tuple[dict[str, Any] | None, pd.DataFrame]:
     records: list[dict[str, Any]] = []
     best_params: dict[str, Any] | None = None
     best_auc = -np.inf
 
-    if development["is_high_performer"].nunique(dropna=True) < 2:
+    if development[target_column].nunique(dropna=True) < 2:
         return None, pd.DataFrame()
 
     folds = _adaptive_rolling_date_splits(development, settings)
@@ -878,20 +991,20 @@ def tune_classifier(
     for candidate_id, params in enumerate(_limit_candidates(CLASSIFIER_PARAMETER_CANDIDATES, settings, mode), 1):
         aucs: list[float] = []
         for fold_number, (train, validation) in enumerate(folds, 1):
-            if train["is_high_performer"].nunique() < 2 or validation["is_high_performer"].nunique() < 2:
+            if train[target_column].nunique() < 2 or validation[target_column].nunique() < 2:
                 continue
 
             model = _build_classifier(params, settings, mode)
-            _fit_classifier(model, train, validation, categorical, settings, mode)
+            _fit_classifier(model, train, validation, categorical, settings, mode, target_column)
             probability = model.predict_proba(prepare_features(validation, categorical))[:, 1]
-            auc = _safe_roc_auc(validation["is_high_performer"], probability)
+            auc = _safe_roc_auc(validation[target_column], probability)
             if pd.notna(auc):
                 aucs.append(float(auc))
             records.append(
                 {
                     "Checkpoint": checkpoint,
                     "Horizon": horizon,
-                    "Target": "is_high_performer",
+                    "Target": target_column,
                     "Candidate": candidate_id,
                     "Fold": fold_number,
                     "Best_Iteration": model.get_best_iteration(),
@@ -944,7 +1057,7 @@ def tune_shared_hyperparameters(
     categorical = categorical_features(snapshot)
 
     selected_targets = list(targets or REGRESSION_TARGETS)
-    shared: dict[str, Any] = {"regressors": {}, "classifier": None}
+    shared: dict[str, Any] = {"regressors": {}, "classifiers": {}}
     frames: list[pd.DataFrame] = []
 
     if run_regression:
@@ -955,10 +1068,19 @@ def tune_shared_hyperparameters(
                 frames.append(fold_results)
 
     if run_classification:
-        params, fold_results = tune_classifier(development, checkpoint, horizon, categorical, settings, mode)
-        shared["classifier"] = params
-        if not fold_results.empty:
-            frames.append(fold_results)
+        for goal, target_column in CLASSIFICATION_TARGETS.items():
+            params, fold_results = tune_classifier(
+                development,
+                checkpoint,
+                horizon,
+                categorical,
+                settings,
+                mode,
+                target_column,
+            )
+            shared["classifiers"][goal] = params
+            if not fold_results.empty:
+                frames.append(fold_results)
 
     return shared, _safe_concat(frames), checkpoint, horizon
 
@@ -972,6 +1094,9 @@ def _base_prediction_frame(holdout: pd.DataFrame) -> pd.DataFrame:
         "Obs_Window",
         "Horizon",
         "future_performance_score",
+        "is_high_client_performer",
+        "is_high_stakes_performer",
+        "is_balanced_high_performer",
         "is_high_performer",
     ]
     return holdout[[column for column in columns if column in holdout.columns]].copy()
@@ -990,7 +1115,7 @@ def train_model_family(
     run_classification: bool = True,
     targets: Iterable[str] | None = None,
     mode: TrainingMode | None = None,
-) -> tuple[dict[str, Any], pd.DataFrame, dict[str, Any], pd.DataFrame, pd.DataFrame]:
+) -> tuple[dict[str, Any], pd.DataFrame, list[dict[str, Any]], pd.DataFrame, pd.DataFrame]:
     development, holdout, holdout_start = split_development_and_holdout(snapshot, settings.final_test_fraction)
     threshold = np.nan
     if run_classification:
@@ -1010,10 +1135,14 @@ def train_model_family(
         "target_transforms": {},
         "regression_target_transforms": {},
         "classifier": None,
+        "classifiers": {},
         "probability_calibrator": {"method": "identity", "model": None},
+        "probability_calibrators": {},
         "classification_threshold": float(_setting(settings, "classification_threshold", 0.5)),
+        "classification_thresholds": {},
         "best_parameters": {},
         "confidence_scores": {},
+        "prediction_interval_tables": {},
         "high_score_threshold": threshold,
         "holdout_start_date": holdout_start,
         "tuned_on_checkpoint": tuning_checkpoint,
@@ -1040,14 +1169,9 @@ def train_model_family(
             if validation.empty:
                 validation = None
 
-            model = _build_regressor(params, settings, mode)
+            probe_model = _build_regressor(params, settings, mode)
             target_transform = _target_transform(params, target)
-            _fit_regressor(model, train, validation, target, categorical, settings, mode, target_transform)
-            model_prediction = _prediction_from_fit(
-                target,
-                model.predict(prepare_features(holdout_target, categorical)),
-                target_transform,
-            )
+            _fit_regressor(probe_model, train, validation, target, categorical, settings, mode, target_transform)
             baseline = _baseline_prediction(holdout_target, target)
             baseline_metrics = regression_metrics(holdout_target[target], baseline)
             blend_weight = 1.0
@@ -1055,18 +1179,39 @@ def train_model_family(
             if validation is not None and not validation.empty:
                 validation_prediction = _prediction_from_fit(
                     target,
-                    model.predict(prepare_features(validation, categorical)),
+                    probe_model.predict(prepare_features(validation, categorical)),
                     target_transform,
                 )
                 validation_baseline = _baseline_prediction(validation, target)
                 blend_weight = _best_blend_weight(validation[target], validation_prediction, validation_baseline)
                 validation_prediction = blend_weight * validation_prediction + (1 - blend_weight) * validation_baseline
                 confidence_table = build_confidence_table(validation[target], validation_prediction)
+                interval_table = build_prediction_interval_table(validation[target], validation_prediction)
             else:
                 confidence_table = {"fallback": np.nan, "bins": []}
+                interval_table = {"lower_residual": 0.0, "upper_residual": 0.0}
 
+            selected_iterations = _fitted_iterations(
+                probe_model,
+                int(_setting(settings, "regressor_iterations", _budget(settings, mode)["regressor_iterations"])),
+            )
+            model = _build_regressor(params, settings, mode, iterations=selected_iterations)
+            _fit_regressor(model, development_target, None, target, categorical, settings, mode, target_transform)
+            model_prediction = _prediction_from_fit(
+                target,
+                model.predict(prepare_features(holdout_target, categorical)),
+                target_transform,
+            )
             prediction = blend_weight * model_prediction + (1 - blend_weight) * baseline
+            prediction_low, prediction_high = prediction_interval_from_table(prediction, interval_table)
             metrics = regression_metrics(holdout_target[target], prediction)
+            actual_values = holdout_target[target].to_numpy(dtype="float64")
+            valid_range = ~np.isnan(actual_values) & ~np.isnan(prediction_low) & ~np.isnan(prediction_high)
+            range_contains_actual = (
+                np.mean((actual_values[valid_range] >= prediction_low[valid_range]) & (actual_values[valid_range] <= prediction_high[valid_range]))
+                if valid_range.any()
+                else np.nan
+            )
             
             metric_confidence = _confidence_from_wape(metrics["WAPE"])
             if pd.isna(metric_confidence):
@@ -1088,7 +1233,7 @@ def train_model_family(
                     "Target": target,
                     "Target_Transform": target_transform,
                     "Holdout_Start": holdout_start,
-                    "Best_Iteration": model.get_best_iteration(),
+                    "Best_Iteration": selected_iterations,
                     **params,
                     **metrics,
                     "Model_Blend_Weight": blend_weight,
@@ -1097,6 +1242,8 @@ def train_model_family(
                     "Baseline_R2": baseline_metrics["R2"],
                     "Baseline_WAPE": baseline_metrics["WAPE"],
                     "WAPE_Improvement": baseline_metrics["WAPE"] - metrics["WAPE"],
+                    "Range_Coverage": float(range_contains_actual),
+                    "Average_Range_Width": float(np.nanmean(prediction_high - prediction_low)),
                 }
             )
             bundle["regressors"][target] = model
@@ -1105,11 +1252,14 @@ def train_model_family(
             bundle["regression_target_transforms"][target] = target_transform
             bundle.setdefault("blend_weights", {})[target] = blend_weight
             bundle.setdefault("confidence_tables", {})[target] = confidence_table
+            bundle["prediction_interval_tables"][target] = interval_table
             bundle["confidence_scores"][target] = float(metric_confidence)
             short_name = target.replace("target_", "")
             predictions.loc[holdout_target.index, f"actual_{short_name}"] = holdout_target[target]
             predictions.loc[holdout_target.index, f"baseline_{short_name}_week_4"] = baseline
+            predictions.loc[holdout_target.index, f"predicted_{short_name}_week_4_low"] = prediction_low
             predictions.loc[holdout_target.index, f"predicted_{short_name}_week_4"] = prediction
+            predictions.loc[holdout_target.index, f"predicted_{short_name}_week_4_high"] = prediction_high
             predictions.loc[holdout_target.index, f"confidence_{short_name}"] = confidence
             week_3_column = f"actual_{short_name}_week_3"
             week_4_column = f"actual_{short_name}_week_4"
@@ -1124,90 +1274,120 @@ def train_model_family(
                         week_column
                     ]
 
-    class_eval: dict[str, Any] = {}
-    calibration_bins = pd.DataFrame()
-    params = shared_parameters.get("classifier")
-    if run_classification and params is not None and development["is_high_performer"].nunique() >= 2:
+    class_eval: list[dict[str, Any]] = []
+    calibration_frames: list[pd.DataFrame] = []
+    if run_classification:
         train, validation, _ = split_development_and_holdout(development, 0.15)
-        classifier = _build_classifier(params, settings, mode)
-
-        if train["is_high_performer"].nunique() >= 2:
-            validation_for_fit = validation if validation["is_high_performer"].nunique() >= 2 else None
-            _fit_classifier(classifier, train, validation_for_fit, categorical, settings, mode)
-        else:
-            _fit_classifier(classifier, development, None, categorical, settings, mode)
-
         default_threshold = float(_setting(settings, "classification_threshold", 0.5))
-        classification_threshold = default_threshold
-        calibrator: ProbabilityCalibrator = {"method": "identity", "model": None}
-        validation_eval: dict[str, Any] = {}
         n_bins = int(_setting(settings, "calibration_bins", 10))
 
-        if validation is not None and not validation.empty and validation["is_high_performer"].nunique() >= 2:
-            raw_validation_probability = classifier.predict_proba(prepare_features(validation, categorical))[:, 1]
-            calibrator, validation_probability = _fit_probability_calibrator(
-                validation["is_high_performer"],
-                raw_validation_probability,
-                settings,
-            )
-            classification_threshold = select_classification_threshold(
-                validation["is_high_performer"],
-                validation_probability,
-                default=default_threshold,
-            )
-            validation_predicted = (validation_probability >= classification_threshold).astype(int)
-            validation_eval = {
-                f"Validation_{key}": value
-                for key, value in _classification_diagnostics(
-                    validation["is_high_performer"],
+        for goal, target_column in CLASSIFICATION_TARGETS.items():
+            params = shared_parameters.get("classifiers", {}).get(goal)
+            if params is None or development[target_column].nunique() < 2:
+                continue
+
+            probe_classifier = _build_classifier(params, settings, mode)
+            if train[target_column].nunique() >= 2:
+                validation_for_fit = validation if validation[target_column].nunique() >= 2 else None
+                _fit_classifier(probe_classifier, train, validation_for_fit, categorical, settings, mode, target_column)
+            else:
+                _fit_classifier(probe_classifier, development, None, categorical, settings, mode, target_column)
+
+            classification_threshold = default_threshold
+            calibrator: ProbabilityCalibrator = {"method": "identity", "model": None}
+            validation_eval: dict[str, Any] = {}
+
+            if validation is not None and not validation.empty and validation[target_column].nunique() >= 2:
+                raw_validation_probability = probe_classifier.predict_proba(prepare_features(validation, categorical))[:, 1]
+                calibrator, validation_probability = _fit_probability_calibrator(
+                    validation[target_column],
+                    raw_validation_probability,
+                    settings,
+                )
+                classification_threshold = select_classification_threshold(
+                    validation[target_column],
                     validation_probability,
-                    validation_predicted,
-                    n_bins=n_bins,
-                ).items()
-            }
+                    default=default_threshold,
+                )
+                validation_predicted = (validation_probability >= classification_threshold).astype(int)
+                validation_eval = {
+                    f"Validation_{key}": value
+                    for key, value in _classification_diagnostics(
+                        validation[target_column],
+                        validation_probability,
+                        validation_predicted,
+                        n_bins=n_bins,
+                    ).items()
+                }
 
-        raw_probability = classifier.predict_proba(prepare_features(holdout, categorical))[:, 1]
-        probability = apply_probability_calibration(raw_probability, calibrator)
-        predicted = (probability >= classification_threshold).astype(int)
-        y_true = holdout["is_high_performer"]
-        class_eval = {
-            "Checkpoint": checkpoint,
-            "Horizon": horizon,
-            "Holdout_Start": holdout_start,
-            "Best_Iteration": classifier.get_best_iteration(),
-            "Calibrator_Method": calibrator["method"],
-            "Classification_Threshold": classification_threshold,
-            **_classification_diagnostics(y_true, probability, predicted, n_bins=n_bins),
-            "Raw_ROC_AUC": _safe_roc_auc(y_true, raw_probability),
-            "Raw_Brier_Score": float(brier_score_loss(y_true, raw_probability)) if len(y_true) else np.nan,
-            "Raw_Log_Loss": _safe_log_loss(y_true, raw_probability),
-            "Raw_Expected_Calibration_Error": _expected_calibration_error(
+            selected_iterations = _fitted_iterations(
+                probe_classifier,
+                int(_setting(settings, "classifier_iterations", _budget(settings, mode)["classifier_iterations"])),
+            )
+            classifier = _build_classifier(params, settings, mode, iterations=selected_iterations)
+            _fit_classifier(classifier, development, None, categorical, settings, mode, target_column)
+            raw_probability = classifier.predict_proba(prepare_features(holdout, categorical))[:, 1]
+            probability = apply_probability_calibration(raw_probability, calibrator)
+            predicted = (probability >= classification_threshold).astype(int)
+            y_true = holdout[target_column]
+            class_eval.append(
+                {
+                    "Checkpoint": checkpoint,
+                    "Horizon": horizon,
+                    "Target": target_column,
+                    "Holdout_Start": holdout_start,
+                    "Best_Iteration": selected_iterations,
+                    "Calibrator_Method": calibrator["method"],
+                    "Classification_Threshold": classification_threshold,
+                    **_classification_diagnostics(y_true, probability, predicted, n_bins=n_bins),
+                    "Raw_ROC_AUC": _safe_roc_auc(y_true, raw_probability),
+                    "Raw_Brier_Score": float(brier_score_loss(y_true, raw_probability)) if len(y_true) else np.nan,
+                    "Raw_Log_Loss": _safe_log_loss(y_true, raw_probability),
+                    "Raw_Expected_Calibration_Error": _expected_calibration_error(
+                        y_true,
+                        raw_probability,
+                        n_bins=n_bins,
+                    ),
+                    **validation_eval,
+                    **params,
+                }
+            )
+
+            calibration_bins = probability_calibration_bins(
                 y_true,
-                raw_probability,
+                probability,
+                raw_probability=raw_probability,
                 n_bins=n_bins,
-            ),
-            **validation_eval,
-            **params,
-        }
-        calibration_bins = probability_calibration_bins(
-            y_true,
-            probability,
-            raw_probability=raw_probability,
-            n_bins=n_bins,
-        )
-        calibration_bins.insert(0, "Dataset", "Holdout")
-        calibration_bins.insert(0, "Horizon", horizon)
-        calibration_bins.insert(0, "Checkpoint", checkpoint)
-        bundle["classifier"] = classifier
-        bundle["probability_calibrator"] = calibrator
-        bundle["classification_threshold"] = classification_threshold
-        bundle["best_parameters"]["is_high_performer"] = params
-        predictions["raw_probability_high_performance"] = raw_probability
-        predictions["probability_high_performance"] = probability
-        predictions["classification_threshold"] = classification_threshold
-        predictions["predicted_high_performer"] = predicted
+            )
+            calibration_bins.insert(0, "Dataset", "Holdout")
+            calibration_bins.insert(0, "Target", target_column)
+            calibration_bins.insert(0, "Horizon", horizon)
+            calibration_bins.insert(0, "Checkpoint", checkpoint)
+            calibration_frames.append(calibration_bins)
 
-    return bundle, pd.DataFrame(evaluations), class_eval, predictions, calibration_bins
+            bundle["classifiers"][goal] = classifier
+            bundle["probability_calibrators"][goal] = calibrator
+            bundle["classification_thresholds"][goal] = classification_threshold
+            bundle["best_parameters"][target_column] = params
+            predictions[f"raw_probability_high_{goal}_performer"] = raw_probability
+            predictions[f"probability_high_{goal}_performer"] = probability
+            predictions[f"classification_threshold_high_{goal}_performer"] = classification_threshold
+            predictions[f"predicted_high_{goal}_performer"] = predicted
+
+        if {"probability_high_client_performer", "probability_high_stakes_performer"}.issubset(predictions.columns):
+            predictions["probability_high_performance"] = predictions[
+                ["probability_high_client_performer", "probability_high_stakes_performer"]
+            ].min(axis=1)
+            predictions["raw_probability_high_performance"] = predictions[
+                ["raw_probability_high_client_performer", "raw_probability_high_stakes_performer"]
+            ].min(axis=1)
+            predictions["classification_threshold"] = default_threshold
+            predictions["predicted_high_performer"] = (
+                predictions["predicted_high_client_performer"].eq(1)
+                & predictions["predicted_high_stakes_performer"].eq(1)
+            ).astype(int)
+
+    return bundle, pd.DataFrame(evaluations), class_eval, predictions, _safe_concat(calibration_frames)
 
 
 def train_all_model_families(
@@ -1249,20 +1429,12 @@ def train_all_model_families(
         max_families = int(_setting(settings, "max_model_families", budget["max_families"]))
 
     started_at = time.time()
-    shared, tuning_df, tuned_checkpoint, tuned_horizon = tune_shared_hyperparameters(
-        snapshots,
-        settings,
-        run_regression=run_regression,
-        run_classification=run_classification,
-        targets=targets,
-        mode=active_mode,
-    )
-
     bundles: dict[tuple[int, int], dict[str, Any]] = {}
     regression_frames: list[pd.DataFrame] = []
     classification_rows: list[dict[str, Any]] = []
     calibration_frames: list[pd.DataFrame] = []
     prediction_frames: list[pd.DataFrame] = []
+    tuning_frames: list[pd.DataFrame] = []
     skipped: list[dict[str, Any]] = []
 
     minimum = settings.min_training_rows + settings.min_validation_rows
@@ -1282,6 +1454,14 @@ def train_all_model_families(
             print(f"Training family day {checkpoint} -> horizon {horizon} [{active_mode}] ...")
 
         try:
+            shared, tuning_df, tuned_checkpoint, tuned_horizon = tune_shared_hyperparameters(
+                {checkpoint_horizon: snapshot},
+                settings,
+                run_regression=run_regression,
+                run_classification=run_classification,
+                targets=targets,
+                mode=active_mode,
+            )
             bundle, regression_eval, classification_eval, predictions, calibration_bins = train_model_family(
                 snapshot,
                 checkpoint,
@@ -1297,10 +1477,12 @@ def train_all_model_families(
             )
             bundles[checkpoint_horizon] = bundle
             trained_count += 1
+            if not tuning_df.empty:
+                tuning_frames.append(tuning_df)
             if not regression_eval.empty:
                 regression_frames.append(regression_eval)
             if classification_eval:
-                classification_rows.append(classification_eval)
+                classification_rows.extend(classification_eval)
             if not calibration_bins.empty:
                 calibration_frames.append(calibration_bins)
             if not predictions.empty:
@@ -1317,7 +1499,7 @@ def train_all_model_families(
         "regression_evaluation": _safe_concat(regression_frames),
         "classification_evaluation": pd.DataFrame(classification_rows),
         "classification_calibration": _safe_concat(calibration_frames),
-        "hyperparameter_tuning": tuning_df,
+        "hyperparameter_tuning": _safe_concat(tuning_frames),
         "holdout_predictions": _safe_concat(prediction_frames),
         "skipped_configurations": pd.DataFrame(skipped),
         "training_metadata": {
@@ -1325,8 +1507,7 @@ def train_all_model_families(
             "run_regression": run_regression,
             "run_classification": run_classification,
             "targets": list(targets or REGRESSION_TARGETS),
-            "tuned_on_checkpoint": tuned_checkpoint,
-            "tuned_on_horizon": tuned_horizon,
+            "tuning_scope": "per_model_family",
             "trained_families": trained_count,
             "elapsed_seconds": time.time() - started_at,
         },

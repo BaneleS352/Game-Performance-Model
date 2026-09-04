@@ -4,7 +4,7 @@
     view: "top_stakes",
     search: "",
     system: "",
-    sort: "predicted_stakes_week_4",
+    sort: "confidence_stakes",
   };
 
   const money = new Intl.NumberFormat("en-ZA", {
@@ -19,7 +19,7 @@
   const number = (value) => Number(value || 0);
   const fmtMoney = (value) => money.format(number(value));
   const fmtWhole = (value) => whole.format(number(value));
-  const fmtPct = (value) => pct.format(number(value));
+  const fmtPct = (value) => value === null || value === undefined || value === "" ? "-" : pct.format(number(value));
 
   function setText(id, value) {
     byId(id).textContent = value;
@@ -54,7 +54,7 @@
   function renderFocusBars() {
     const top = [...(data.top_stakes || data.forecasts || [])]
       .sort((a, b) => number(b.predicted_stakes_week_4) - number(a.predicted_stakes_week_4))
-      .slice(0, 10);
+      .slice(0, 20);
     const max = Math.max(...top.map((row) => number(row.predicted_stakes_week_4)), 1);
     byId("focusCount").textContent = `Top ${top.length} of ${fmtWhole(data.summary.games_scored)} games by stakes`;
     byId("focusBars").innerHTML = top
@@ -77,23 +77,46 @@
     return data[state.view] || data.forecasts || [];
   }
 
+  function defaultSortForView(view) {
+    if (view === "top_stakes") return "confidence_stakes";
+    if (view === "top_clients") return "confidence_clients";
+    return "predicted_stakes_week_4";
+  }
+
+  function tieBreakSort(sortKey) {
+    if (sortKey === "confidence_stakes") return "predicted_stakes_week_4";
+    if (sortKey === "confidence_clients") return "predicted_clients_week_4";
+    return sortKey === "predicted_stakes_week_4" ? "predicted_clients_week_4" : "predicted_stakes_week_4";
+  }
+
   function filteredRows() {
     const query = state.search.trim().toLowerCase();
+    const secondarySort = tieBreakSort(state.sort);
     return rowsForView()
       .filter((row) => !state.system || row.SystemName === state.system)
       .filter((row) => {
         if (!query) return true;
         return `${row.TournamentName || ""} ${row.SystemName || ""}`.toLowerCase().includes(query);
       })
-      .sort((a, b) => number(b[state.sort]) - number(a[state.sort]));
+      .sort((a, b) => {
+        const primary = number(b[state.sort]) - number(a[state.sort]);
+        return primary || number(b[secondarySort]) - number(a[secondarySort]);
+      });
   }
 
-  function signalFor(row) {
-    const confidence = Math.min(number(row.confidence_clients), number(row.confidence_stakes));
-    const highValue = number(row.predicted_stakes_week_4) > 1000000 || number(row.predicted_clients_week_4) > 5000;
-    if (highValue && confidence < 0.5) return ["Review", "review"];
-    if (highValue) return ["Prioritize", "priority"];
-    return ["Monitor", "review"];
+  function performanceScore(row) {
+    if (row.probability_high_performance !== null && row.probability_high_performance !== undefined) {
+      return row.probability_high_performance;
+    }
+    if (
+      row.probability_high_client_performer !== null &&
+      row.probability_high_client_performer !== undefined &&
+      row.probability_high_stakes_performer !== null &&
+      row.probability_high_stakes_performer !== undefined
+    ) {
+      return Math.min(number(row.probability_high_client_performer), number(row.probability_high_stakes_performer));
+    }
+    return null;
   }
 
   function renderRows() {
@@ -109,7 +132,6 @@
     byId("gameRows").innerHTML = rows
       .slice(0, 300)
       .map((row) => {
-        const [label, klass] = signalFor(row);
         return `
           <tr>
             <td>
@@ -121,7 +143,7 @@
             <td class="num">${fmtPct(row.confidence_stakes)}</td>
             <td class="num">${fmtWhole(row.predicted_clients_week_4)}</td>
             <td class="num">${fmtPct(row.confidence_clients)}</td>
-            <td><span class="signal ${klass}">${label}</span></td>
+            <td class="num">${fmtPct(performanceScore(row))}</td>
           </tr>`;
       })
       .join("");
@@ -137,6 +159,8 @@
         button.classList.add("active");
         button.setAttribute("aria-selected", "true");
         state.view = button.dataset.view;
+        state.sort = defaultSortForView(state.view);
+        byId("sortSelect").value = state.sort;
         renderRows();
       });
     });
@@ -172,6 +196,7 @@
   renderSummary();
   renderSystemOptions();
   renderFocusBars();
+  byId("sortSelect").value = state.sort;
   bindControls();
   renderRows();
 })();

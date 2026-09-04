@@ -13,10 +13,21 @@ FORECAST_FIELDS = [
     "TournamentName",
     "SystemName",
     "First_Observed_Date",
+    "predicted_clients_week_4_low",
     "predicted_clients_week_4",
+    "predicted_clients_week_4_high",
     "confidence_clients",
+    "predicted_stakes_week_4_low",
     "predicted_stakes_week_4",
+    "predicted_stakes_week_4_high",
     "confidence_stakes",
+    "probability_high_client_performer",
+    "predicted_high_client_performer",
+    "probability_high_stakes_performer",
+    "predicted_high_stakes_performer",
+    "raw_probability_high_performance",
+    "probability_high_performance",
+    "predicted_high_performer",
     "active_observation_days",
     "observation_coverage",
     "As_Of_Date",
@@ -49,10 +60,21 @@ def _safe_rate(series: pd.Series) -> float:
     return float(pd.to_numeric(series, errors="coerce").mean()) if not series.empty else 0.0
 
 
+def _latest_checkpoint(frame: pd.DataFrame, checkpoint_column: str) -> pd.DataFrame:
+    if checkpoint_column not in frame.columns:
+        return frame
+    return (
+        frame.assign(_checkpoint=pd.to_numeric(frame[checkpoint_column], errors="coerce").fillna(-1))
+        .sort_values(["Game_ID", "_checkpoint"], kind="stable")
+        .drop_duplicates("Game_ID", keep="last")
+        .drop(columns="_checkpoint")
+    )
+
+
 def build_dashboard_data(workbook_path: str | Path) -> dict[str, Any]:
     workbook_path = Path(workbook_path)
-    forecasts = pd.read_excel(workbook_path, sheet_name="Forecasts")
-    holdout = pd.read_excel(workbook_path, sheet_name="Holdout Comparison")
+    forecasts = _latest_checkpoint(pd.read_excel(workbook_path, sheet_name="Forecasts"), "Checkpoint")
+    holdout = _latest_checkpoint(pd.read_excel(workbook_path, sheet_name="Holdout Comparison"), "Obs_Window")
 
     forecasts["predicted_clients_week_4"] = pd.to_numeric(
         forecasts["predicted_clients_week_4"],
@@ -94,9 +116,13 @@ def build_dashboard_data(workbook_path: str | Path) -> dict[str, Any]:
 
     top_stakes = forecasts.sort_values("predicted_stakes_week_4", ascending=False).head(250)
     top_clients = forecasts.sort_values("predicted_clients_week_4", ascending=False).head(250)
+    observation_coverage = pd.to_numeric(
+        forecasts.get("observation_coverage", pd.Series(1.0, index=forecasts.index)),
+        errors="coerce",
+    ).fillna(1)
     review_candidates = forecasts.assign(
         value_rank=forecasts["predicted_stakes_week_4"].rank(ascending=False, method="first"),
-        coverage_gap=1 - pd.to_numeric(forecasts.get("observation_coverage", 1), errors="coerce").fillna(1),
+        coverage_gap=1 - observation_coverage,
     ).sort_values(["coverage_gap", "predicted_stakes_week_4"], ascending=[False, False]).head(250)
 
     return {

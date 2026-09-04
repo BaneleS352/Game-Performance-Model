@@ -19,7 +19,7 @@
       </div>
       <aside class="model-note" aria-label="Model timing">
         <span>Model window</span>
-        <strong>Weeks 1-2 in, Week 4 out</strong>
+        <strong>Weeks 1-2 or 1-3 in, Week 4 out</strong>
         <small id="asOfDate">Loading data</small>
       </aside>
     </header>
@@ -71,23 +71,23 @@
         <article class="panel">
           <div class="section-title">
             <p class="eyebrow">Model trust</p>
-            <h2>Back-test signal</h2>
+            <h2>Latest-checkpoint accuracy</h2>
           </div>
           <div class="trust-grid">
             <div>
-              <span>Within 10%</span>
+              <span>Both within 10%</span>
               <strong id="within10">-</strong>
             </div>
             <div>
-              <span>Within 20%</span>
+              <span>Both within 20%</span>
               <strong id="within20">-</strong>
             </div>
             <div>
-              <span>Client closeness</span>
+              <span>Avg high-client probability</span>
               <strong id="clientProbability">-</strong>
             </div>
             <div>
-              <span>Stakes closeness</span>
+              <span>Avg high-stakes probability</span>
               <strong id="stakesProbability">-</strong>
             </div>
           </div>
@@ -135,6 +135,7 @@
             <select id="sortSelect">
               <option value="predicted_stakes_week_4">Predicted stakes</option>
               <option value="predicted_clients_week_4">Predicted clients</option>
+              <option value="probability_high_performance">High performance score</option>
               <option value="confidence_stakes">Stakes confidence</option>
               <option value="confidence_clients">Clients confidence</option>
             </select>
@@ -151,7 +152,7 @@
                 <th>Stake confidence</th>
                 <th>Predicted clients</th>
                 <th>Client confidence</th>
-                <th>Recommended action</th>
+                <th>High performance score</th>
               </tr>
             </thead>
             <tbody id="gameRows"></tbody>

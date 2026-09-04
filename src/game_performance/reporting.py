@@ -77,6 +77,8 @@ def _growth_percentage(week_1: pd.Series, week_2: pd.Series) -> pd.Series:
 
 
 def _is_off_by(actual: pd.Series, predicted: pd.Series, threshold: float) -> pd.Series:
+    actual = pd.to_numeric(actual, errors="coerce")
+    predicted = pd.to_numeric(predicted, errors="coerce")
     denominator = actual.abs().replace(0, np.nan)
     error = (predicted - actual).abs() / denominator
     return error.gt(threshold).fillna(False).astype("int8")
@@ -150,12 +152,20 @@ def build_holdout_comparison(
     for metric in metrics:
         actual = f"actual_{metric}_week_4"
         predicted = f"predicted_{metric}_week_4"
+        low = f"predicted_{metric}_week_4_low"
+        high = f"predicted_{metric}_week_4_high"
 
         if {actual, predicted}.issubset(test.columns):
             variance = test[predicted] - test[actual]
 
             test[f"variance_{metric}"] = variance
             test[f"probability_{metric}"] = _prediction_probability(test[actual], test[predicted])
+            if {low, high}.issubset(test.columns):
+                range_valid = test[actual].notna() & test[low].notna() & test[high].notna()
+                test[f"{metric}_actual_in_range"] = test[actual].between(
+                    test[low], test[high], inclusive="both"
+                ).where(range_valid).astype("Int8")
+                test[f"{metric}_range_width"] = test[high] - test[low]
             week_3 = f"actual_{metric}_week_3"
             week_4 = f"actual_{metric}_week_4"
             if {week_3, week_4}.issubset(test.columns):
@@ -190,7 +200,18 @@ def build_holdout_comparison(
         "off_by_10_pct",
         "off_by_20_pct",
         "future_performance_score",
+        "is_high_client_performer",
+        "is_high_stakes_performer",
+        "is_balanced_high_performer",
         "is_high_performer",
+        "raw_probability_high_client_performer",
+        "probability_high_client_performer",
+        "classification_threshold_high_client_performer",
+        "predicted_high_client_performer",
+        "raw_probability_high_stakes_performer",
+        "probability_high_stakes_performer",
+        "classification_threshold_high_stakes_performer",
+        "predicted_high_stakes_performer",
         "raw_probability_high_performance",
         "probability_high_performance",
         "classification_threshold",
@@ -204,10 +225,14 @@ def build_holdout_comparison(
                 f"actual_{metric}_week_4",
                 f"week_3_to_week_4_{metric}_growth_pct",
                 f"baseline_{metric}_week_4",
+                f"predicted_{metric}_week_4_low",
                 f"predicted_{metric}_week_4",
+                f"predicted_{metric}_week_4_high",
                 f"confidence_{metric}",
                 f"variance_{metric}",
                 f"probability_{metric}",
+                f"{metric}_actual_in_range",
+                f"{metric}_range_width",
             ]
         )
 
@@ -334,10 +359,18 @@ def _forecast_export_columns(forecasts: pd.DataFrame) -> pd.DataFrame:
         "Horizon",
         "active_observation_days",
         "observation_coverage",
+        "predicted_clients_week_4_low",
         "predicted_clients_week_4",
+        "predicted_clients_week_4_high",
         "confidence_clients",
+        "predicted_stakes_week_4_low",
         "predicted_stakes_week_4",
+        "predicted_stakes_week_4_high",
         "confidence_stakes",
+        "probability_high_client_performer",
+        "predicted_high_client_performer",
+        "probability_high_stakes_performer",
+        "predicted_high_stakes_performer",
         "raw_probability_high_performance",
         "probability_high_performance",
         "classification_threshold",
@@ -360,16 +393,22 @@ def _score_calculation_sheet() -> pd.DataFrame:
     return pd.DataFrame(
         [
             {
-                "Metric": "Future Clients",
-                "Target field": "target_clients",
-                "Weight": 0.50,
-                "Calculation note": "Empirical percentile within the development dataset.",
+                "Metric": "High client performer",
+                "Target field": "is_high_client_performer",
+                "Weight": np.nan,
+                "Calculation note": "Week-4 clients at or above the 80th percentile from the development dataset.",
             },
             {
-                "Metric": "Future Stakes",
-                "Target field": "target_stakes",
-                "Weight": 0.50,
-                "Calculation note": "Empirical percentile within the development dataset.",
+                "Metric": "High stakes performer",
+                "Target field": "is_high_stakes_performer",
+                "Weight": np.nan,
+                "Calculation note": "Week-4 stakes at or above the 80th percentile from the development dataset.",
+            },
+            {
+                "Metric": "Balanced high performer",
+                "Target field": "is_balanced_high_performer",
+                "Weight": np.nan,
+                "Calculation note": "Marked when both client and stakes high-performer flags are true.",
             },
         ]
     )
@@ -426,16 +465,13 @@ def export_excel(
             if name == "future_performance_score_calculator":
                 ws["F1"] = "Formula"
                 ws["F2"] = (
-                    "future_performance_score = 50% * percentile(Future Clients) "
-                    "+ 50% * percentile(Future Stakes)"
+                    "High client/stakes performers are games at or above each "
+                    "development 80th percentile threshold."
                 )
                 ws["F4"] = "High performer flag"
                 ws["F5"] = (
-                    "Marked high performer when future_performance_score is at or above "
-                    "the 80th percentile threshold from the development scored dataset."
+                    "Balanced high performer is marked when both client and stakes flags are true."
                 )
-                ws["C2"].number_format = "0%"
-                ws["C3"].number_format = "0%"
 
             # Auto-size columns
             for column_cells in ws.columns:

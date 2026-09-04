@@ -4,6 +4,11 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
+BUSINESS_GOAL_TARGETS = {
+    "clients": ("target_clients", "is_high_client_performer"),
+    "stakes": ("target_stakes", "is_high_stakes_performer"),
+}
+
 
 def split_development_and_holdout(snapshot: pd.DataFrame, test_fraction: float = 0.15):
     data = snapshot.dropna(subset=["First_Observed_Date"]).copy()
@@ -62,13 +67,19 @@ def create_high_performance_target(
     holdout: pd.DataFrame,
     percentile: float = 0.80,
 ):
-    """Fit score references on development only, then apply them to holdout."""
-    weights = {
-        "target_clients": 0.50,
-        "target_stakes": 0.50,
+    """Fit business-goal thresholds on development only, then apply them to holdout."""
+    references = {
+        metric: np.sort(development[metric].dropna().to_numpy())
+        for metric, _ in BUSINESS_GOAL_TARGETS.values()
     }
-    references = {metric: np.sort(development[metric].dropna().to_numpy()) for metric in weights}
-    medians = {metric: development[metric].median() for metric in weights}
+    medians = {
+        metric: development[metric].median()
+        for metric, _ in BUSINESS_GOAL_TARGETS.values()
+    }
+    thresholds = {
+        flag: float(development[metric].quantile(percentile))
+        for metric, flag in BUSINESS_GOAL_TARGETS.values()
+    }
 
     def empirical_percentile(values, reference):
         if len(reference) == 0:
@@ -78,16 +89,19 @@ def create_high_performance_target(
     def score(frame):
         result = frame.copy()
         composite = np.zeros(len(result), dtype=float)
-        for metric, weight in weights.items():
+        for metric, flag in BUSINESS_GOAL_TARGETS.values():
             # Important: holdout missing values use development medians, not holdout medians.
             values = pd.to_numeric(result[metric], errors="coerce").fillna(medians[metric])
-            composite += weight * empirical_percentile(values, references[metric])
+            composite += 0.50 * empirical_percentile(values, references[metric])
+            result[flag] = values.ge(thresholds[flag]).astype(int)
+        result["is_balanced_high_performer"] = (
+            result["is_high_client_performer"].eq(1)
+            & result["is_high_stakes_performer"].eq(1)
+        ).astype(int)
         result["future_performance_score"] = composite
+        result["is_high_performer"] = result["is_balanced_high_performer"]
         return result
 
     development_scored = score(development)
     holdout_scored = score(holdout)
-    threshold = float(development_scored["future_performance_score"].quantile(percentile))
-    development_scored["is_high_performer"] = (development_scored["future_performance_score"] >= threshold).astype(int)
-    holdout_scored["is_high_performer"] = (holdout_scored["future_performance_score"] >= threshold).astype(int)
-    return development_scored, holdout_scored, threshold
+    return development_scored, holdout_scored, thresholds

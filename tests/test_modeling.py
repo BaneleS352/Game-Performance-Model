@@ -2,8 +2,10 @@ import numpy as np
 
 from game_performance.modeling import (
     build_confidence_table,
+    build_prediction_interval_table,
     confidence_from_prediction,
     inverse_transform_regression_target,
+    prediction_interval_from_table,
     select_classification_threshold,
     transform_regression_target,
 )
@@ -14,6 +16,7 @@ def test_confidence_table_calibrates_prediction_ranges():
         actual=[100, 100, 1000, 1000],
         predicted=[95, 90, 500, 450],
         bins=2,
+        min_bin_rows=1,
     )
 
     confidence = confidence_from_prediction([95, 500], table, [1, 1])
@@ -49,3 +52,37 @@ def test_select_classification_threshold_uses_best_validation_f1():
 
     assert threshold >= 0.50
     assert np.array_equal(predicted, y_true)
+
+
+def test_prediction_ranges_keep_midpoint_inside_interval():
+    table = build_prediction_interval_table(
+        actual=[80, 100, 130],
+        predicted=[100, 100, 100],
+    )
+
+    low, high = prediction_interval_from_table([100, 10], table)
+
+    assert np.all(low <= np.array([100, 10]))
+    assert np.all(high >= np.array([100, 10]))
+    assert np.all(low >= 0)
+
+
+def test_prediction_ranges_scale_with_validation_prediction_band():
+    predicted = np.array([100.0] * 30 + [10_000.0] * 30)
+    actual = np.array([95.0] * 30 + [8_000.0] * 30)
+    table = build_prediction_interval_table(actual, predicted, bins=2, min_bin_rows=10)
+
+    low, high = prediction_interval_from_table([100.0, 10_000.0], table)
+
+    assert table["bins"]
+    assert high[1] - low[1] > high[0] - low[0]
+
+
+def test_prediction_ranges_keep_series_values_aligned_by_position():
+    table = build_prediction_interval_table(
+        actual=np.array([80.0, 120.0]),
+        predicted=np.array([100.0, 100.0]),
+    )
+
+    assert table["lower_residual"] == -16.0
+    assert table["upper_residual"] == 16.0
