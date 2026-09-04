@@ -104,28 +104,13 @@
       });
   }
 
-  function performanceScore(row) {
-    if (row.probability_high_performance !== null && row.probability_high_performance !== undefined) {
-      return row.probability_high_performance;
-    }
-    if (
-      row.probability_high_client_performer !== null &&
-      row.probability_high_client_performer !== undefined &&
-      row.probability_high_stakes_performer !== null &&
-      row.probability_high_stakes_performer !== undefined
-    ) {
-      return Math.min(number(row.probability_high_client_performer), number(row.probability_high_stakes_performer));
-    }
-    return null;
-  }
-
   function renderRows() {
     const rows = filteredRows();
     byId("rowCount").textContent = `${fmtWhole(rows.length)} games shown`;
     if (!rows.length) {
       byId("gameRows").innerHTML = `
           <tr>
-            <td class="empty-row" colspan="7">No games match the current filters.</td>
+            <td class="empty-row" colspan="6">No games match the current filters.</td>
           </tr>`;
       return;
     }
@@ -143,7 +128,6 @@
             <td class="num">${fmtPct(row.confidence_stakes)}</td>
             <td class="num">${fmtWhole(row.predicted_clients_week_4)}</td>
             <td class="num">${fmtPct(row.confidence_clients)}</td>
-            <td class="num">${fmtPct(performanceScore(row))}</td>
           </tr>`;
       })
       .join("");
