@@ -31,6 +31,7 @@ src/game_performance/
 5. **Separated live features from future targets.** `require_future=False` never emits `target_*` columns.
 6. **Replaced hard-coded Windows source path.** Set `GAME_DATA_FILE` or use the default `data/raw/game_performance.xlsx`.
 7. **Added schema checks, tests, package metadata, and deterministic settings.**
+8. **Added accuracy-first lifecycle selection.** The pipeline compares checkpoints at days 21, 28, 35, 42, 49, and 56 for the next seven days, using rolling temporal validation and recent-versus-expanding training windows.
 
 ## Execution order
 
@@ -50,4 +51,38 @@ Run notebooks in numeric order. Each stage writes an explicit artifact used by t
 - `artifacts/reports/current_predictions.pkl`
 - `artifacts/reports/model_business_report.xlsx`
 
+## Dashboard
+
+The dashboard is a React/Vite static app that reads the exported workbook data
+from `artifacts/dashboard/dashboard_data.js`.
+
+```bash
+python -m game_performance.dashboard
+cd dashboard
+pnpm install
+pnpm build
+```
+
+Open `artifacts/dashboard/index.html` after building. The dashboard shows
+curated Top Stakes and Top Clients ledger views with focused forecast ranges.
+
 The raw workbook is not included in this refactor, so full model training was not executed here. Static compilation and unit tests validate the refactored code paths that do not require the private source workbook.
+
+### Score an uploaded workbook locally
+
+Start the Vite dashboard:
+
+```bash
+python -m pip install -e ".[dev]"
+cd dashboard
+pnpm install
+pnpm dev
+```
+
+In a second terminal from the project root:
+
+```bash
+python -m game_performance.server
+```
+
+Open `http://127.0.0.1:5173`, choose an `.xlsx` workbook and worksheet, then run the existing trained model. The selected sheet must include `Date`, `SystemName`, `TournamentName`, `Clients`, and `Stakes` columns. Each upload and generated report is kept under `data/uploads/` and `artifacts/uploads/`; the dashboard shows the latest successful run.

@@ -57,7 +57,21 @@ def test_dashboard_data_summarises_workbook():
         assert data["forecasts"][0]["confidence_clients"] == 0.8
         assert data["forecasts"][1]["confidence_stakes"] == 0.4
         assert data["forecasts"][0]["probability_high_performance"] == 0.9
-        assert "predicted_ggr" not in data["forecasts"][0]
+        assert data["forecasts"][0]["predicted_ggr"] == 999
+        assert [sheet["name"] for sheet in data["workbook_sheets"]] == ["Holdout Comparison", "Forecasts"]
+        assert data["workbook_sheets"][1]["totalRows"] == 2
+        assert data["workbook_sheets"][1]["rows"][0]["TournamentName"] == "Game A"
+        assert [column["key"] for column in data["columns"]["forecasts"]] == list(
+            pd.read_excel(workbook, sheet_name="Forecasts", nrows=0).columns
+        )
+        assert any(
+            column["key"] == "predicted_ggr" and column["type"] == "money"
+            for column in data["columns"]["forecasts"]
+        )
+        assert any(
+            column["key"] == "predicted_stakes_week_4" and column["defaultVisible"]
+            for column in data["columns"]["forecasts"]
+        )
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
 

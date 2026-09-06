@@ -26,12 +26,28 @@ def split_development_and_holdout(snapshot: pd.DataFrame, test_fraction: float =
     )
 
 
+def restrict_training_window(
+    development: pd.DataFrame,
+    window_days: int | None,
+    *,
+    reference_date: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """Keep all history or only the requested recent launch-date window."""
+    if window_days is None or development.empty:
+        return development.copy()
+    dates = pd.to_datetime(development["First_Observed_Date"], errors="coerce")
+    reference = pd.Timestamp(reference_date) if reference_date is not None else dates.max()
+    cutoff = reference - pd.Timedelta(days=int(window_days) - 1)
+    return development.loc[dates.ge(cutoff)].copy()
+
+
 def rolling_date_splits(
     development: pd.DataFrame,
     *,
     n_splits: int,
     min_training_rows: int,
     min_validation_rows: int,
+    training_window_days: int | None = None,
 ):
     dates = np.sort(pd.to_datetime(development["First_Observed_Date"]).dropna().unique())
     if len(dates) < n_splits + 2:
@@ -43,6 +59,12 @@ def rolling_date_splits(
         validation_dates = blocks[i]
         train = development[development["First_Observed_Date"].isin(train_dates)].copy()
         validation = development[development["First_Observed_Date"].isin(validation_dates)].copy()
+        if training_window_days is not None and not validation.empty:
+            train = restrict_training_window(
+                train,
+                training_window_days,
+                reference_date=pd.Timestamp(validation_dates[0]),
+            )
         if len(train) >= min_training_rows and len(validation) >= min_validation_rows:
             folds.append((train, validation))
     if not folds:

@@ -17,13 +17,16 @@ class Settings:
     min_validation_rows: int = 25
     min_calibration_rows: int = 50
     calibration_bins: int = 10
-    representative_tuning_checkpoint: int = 14
-    representative_tuning_horizon: int = 14
+    forecast_horizon: int = 7
+    candidate_checkpoints: tuple[int, ...] = (21, 28, 35, 42, 49, 56)
+    training_window_days: tuple[int | None, ...] = (None, 30, 60, 90, 120)
+    selection_mode: str = "quick"
+    representative_tuning_checkpoint: int = 21
+    representative_tuning_horizon: int = 7
 
-    horizon_strategy: dict[int, list[int]] = field(default_factory=lambda: {
-        14: [14],
-        21: [7],
-    })
+    @property
+    def horizon_strategy(self) -> dict[int, list[int]]:
+        return {checkpoint: [self.forecast_horizon] for checkpoint in self.candidate_checkpoints}
 
     def __post_init__(self) -> None:
         if not self.source_file.is_absolute():

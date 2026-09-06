@@ -22,6 +22,7 @@ from .features import REGRESSION_TARGETS, categorical_features, prepare_features
 from .validation import (
     create_high_performance_target,
     regression_metrics,
+    restrict_training_window,
     rolling_date_splits,
     split_development_and_holdout,
 )
@@ -675,6 +676,18 @@ def confidence_from_prediction(
 
 def _baseline_prediction(frame: pd.DataFrame, target: str) -> np.ndarray:
     short = target.replace("target_", "")
+    recent_values = frame[f"{short}_last_7_mean"] if f"{short}_last_7_mean" in frame.columns else None
+    recent_mean = pd.to_numeric(recent_values, errors="coerce") if recent_values is not None else None
+    if recent_mean is not None and recent_mean.notna().any():
+        return np.maximum(recent_mean.fillna(0).to_numpy(dtype="float64") * 7, 0)
+
+    observed_values = frame[f"obs_{short}_sum"] if f"obs_{short}_sum" in frame.columns else None
+    observed = pd.to_numeric(observed_values, errors="coerce") if observed_values is not None else None
+    window_values = frame["Obs_Window"] if "Obs_Window" in frame.columns else None
+    window = pd.to_numeric(window_values, errors="coerce").replace(0, np.nan) if window_values is not None else None
+    if observed is not None and window is not None and observed.notna().any():
+        return np.maximum((observed.fillna(0) / window * 7).fillna(0).to_numpy(dtype="float64"), 0)
+
     week_3_column = f"{short}_week_3_sum"
     week_2_column = f"{short}_week_2_sum"
     week_1_column = f"{short}_week_1_sum"
@@ -893,7 +906,11 @@ def _fitted_iterations(model: Any, fallback: int) -> int:
     return trees or fallback
 
 
-def _adaptive_rolling_date_splits(development: pd.DataFrame, settings: Settings) -> list[tuple[pd.DataFrame, pd.DataFrame]]:
+def _adaptive_rolling_date_splits(
+    development: pd.DataFrame,
+    settings: Settings,
+    training_window_days: int | None = None,
+) -> list[tuple[pd.DataFrame, pd.DataFrame]]:
     dates = pd.to_datetime(development["First_Observed_Date"]).dropna().unique()
     max_splits = max(1, len(dates) - 2)
     preferred_splits = min(int(settings.rolling_validation_folds), max_splits)
@@ -905,6 +922,7 @@ def _adaptive_rolling_date_splits(development: pd.DataFrame, settings: Settings)
                 n_splits=n_splits,
                 min_training_rows=settings.min_training_rows,
                 min_validation_rows=settings.min_validation_rows,
+                training_window_days=training_window_days,
             )
         except ValueError:
             continue
@@ -978,6 +996,7 @@ def tune_classifier(
     settings: Settings,
     mode: TrainingMode | None = None,
     target_column: str = "is_high_performer",
+    training_window_days: int | None = None,
 ) -> tuple[dict[str, Any] | None, pd.DataFrame]:
     records: list[dict[str, Any]] = []
     best_params: dict[str, Any] | None = None
@@ -986,7 +1005,7 @@ def tune_classifier(
     if development[target_column].nunique(dropna=True) < 2:
         return None, pd.DataFrame()
 
-    folds = _adaptive_rolling_date_splits(development, settings)
+    folds = _adaptive_rolling_date_splits(development, settings, training_window_days)
 
     for candidate_id, params in enumerate(_limit_candidates(CLASSIFIER_PARAMETER_CANDIDATES, settings, mode), 1):
         aucs: list[float] = []
@@ -1049,6 +1068,7 @@ def tune_shared_hyperparameters(
     run_classification: bool = True,
     targets: Iterable[str] | None = None,
     mode: TrainingMode | None = None,
+    training_window_days: int | None = None,
 ) -> tuple[dict[str, Any], pd.DataFrame, int, int]:
     (checkpoint, horizon), snapshot = choose_representative_snapshot(snapshots, settings)
     development, holdout, _ = split_development_and_holdout(snapshot, settings.final_test_fraction)
@@ -1062,7 +1082,16 @@ def tune_shared_hyperparameters(
 
     if run_regression:
         for target in selected_targets:
-            params, fold_results = tune_regressor(development, target, checkpoint, horizon, categorical, settings, mode)
+            params, fold_results = tune_regressor(
+                development,
+                target,
+                checkpoint,
+                horizon,
+                categorical,
+                settings,
+                mode,
+                training_window_days,
+            )
             shared["regressors"][target] = params
             if not fold_results.empty:
                 frames.append(fold_results)
@@ -1077,6 +1106,7 @@ def tune_shared_hyperparameters(
                 settings,
                 mode,
                 target_column,
+                training_window_days,
             )
             shared["classifiers"][goal] = params
             if not fold_results.empty:
@@ -1115,8 +1145,14 @@ def train_model_family(
     run_classification: bool = True,
     targets: Iterable[str] | None = None,
     mode: TrainingMode | None = None,
+    training_window_days: int | None = None,
 ) -> tuple[dict[str, Any], pd.DataFrame, list[dict[str, Any]], pd.DataFrame, pd.DataFrame]:
     development, holdout, holdout_start = split_development_and_holdout(snapshot, settings.final_test_fraction)
+    development = restrict_training_window(
+        development,
+        training_window_days,
+        reference_date=holdout_start,
+    )
     threshold = np.nan
     if run_classification:
         development, holdout, threshold = create_high_performance_target(
@@ -1148,6 +1184,7 @@ def train_model_family(
         "tuned_on_checkpoint": tuning_checkpoint,
         "tuned_on_horizon": tuning_horizon,
         "training_mode": _training_mode(settings, mode),
+        "training_window_days": training_window_days,
     }
     evaluations: list[dict[str, Any]] = []
     predictions = _base_prediction_frame(holdout)
@@ -1256,6 +1293,10 @@ def train_model_family(
             bundle["confidence_scores"][target] = float(metric_confidence)
             short_name = target.replace("target_", "")
             predictions.loc[holdout_target.index, f"actual_{short_name}"] = holdout_target[target]
+            predictions.loc[holdout_target.index, f"baseline_{short_name}"] = baseline
+            predictions.loc[holdout_target.index, f"predicted_{short_name}_low"] = prediction_low
+            predictions.loc[holdout_target.index, f"predicted_{short_name}"] = prediction
+            predictions.loc[holdout_target.index, f"predicted_{short_name}_high"] = prediction_high
             predictions.loc[holdout_target.index, f"baseline_{short_name}_week_4"] = baseline
             predictions.loc[holdout_target.index, f"predicted_{short_name}_week_4_low"] = prediction_low
             predictions.loc[holdout_target.index, f"predicted_{short_name}_week_4"] = prediction
@@ -1336,6 +1377,7 @@ def train_model_family(
                     "Horizon": horizon,
                     "Target": target_column,
                     "Holdout_Start": holdout_start,
+                    "Training_Window_Days": training_window_days,
                     "Best_Iteration": selected_iterations,
                     "Calibrator_Method": calibrator["method"],
                     "Classification_Threshold": classification_threshold,
@@ -1388,6 +1430,149 @@ def train_model_family(
             ).astype(int)
 
     return bundle, pd.DataFrame(evaluations), class_eval, predictions, _safe_concat(calibration_frames)
+
+
+def select_best_configuration(
+    snapshots: dict[tuple[int, int], pd.DataFrame],
+    settings: Settings,
+    *,
+    targets: Iterable[str] | None = None,
+    mode: TrainingMode | None = None,
+) -> tuple[dict[str, Any], pd.DataFrame]:
+    """Select checkpoint and training window using rolling development WAPE only."""
+    selected_targets = list(targets or REGRESSION_TARGETS)
+    records: list[dict[str, Any]] = []
+    selection_mode = mode or _setting(settings, "selection_mode", "quick")
+
+    for (checkpoint, horizon), snapshot in sorted(snapshots.items()):
+        minimum = settings.min_training_rows + settings.min_validation_rows
+        if len(snapshot) < minimum:
+            continue
+        development, _, _ = split_development_and_holdout(snapshot, settings.final_test_fraction)
+        categorical = categorical_features(snapshot)
+
+        for training_window_days in settings.training_window_days:
+            target_scores: dict[str, float] = {}
+            fold_counts: list[int] = []
+            for target in selected_targets:
+                try:
+                    params, tuning = tune_regressor(
+                        development,
+                        target,
+                        checkpoint,
+                        horizon,
+                        categorical,
+                        settings,
+                        selection_mode,
+                        training_window_days,
+                    )
+                except ValueError:
+                    continue
+                if tuning.empty:
+                    continue
+
+                candidate_scores = tuning.groupby("Candidate", as_index=False)["WAPE"].mean().dropna()
+                if candidate_scores.empty:
+                    continue
+                best_candidate = candidate_scores.sort_values("WAPE").iloc[0]
+                target_scores[target] = float(best_candidate["WAPE"])
+                fold_counts.append(int((tuning["Candidate"] == best_candidate["Candidate"]).sum()))
+
+            if len(target_scores) != len(selected_targets):
+                continue
+            records.append(
+                {
+                    "Checkpoint": checkpoint,
+                    "Horizon": horizon,
+                    "Training_Window_Days": training_window_days,
+                    "WAPE_Clients": target_scores.get("target_clients", np.nan),
+                    "WAPE_Stakes": target_scores.get("target_stakes", np.nan),
+                    "Mean_WAPE": float(np.mean(list(target_scores.values()))),
+                    "Validation_Folds": min(fold_counts) if fold_counts else 0,
+                    "Selection_Mode": selection_mode,
+                }
+            )
+
+    evaluation = pd.DataFrame(records).sort_values(
+        ["Mean_WAPE", "WAPE_Clients", "WAPE_Stakes", "Checkpoint"],
+        kind="stable",
+    ).reset_index(drop=True)
+    if evaluation.empty:
+        raise ValueError("No checkpoint and training-window configuration met validation requirements.")
+
+    best = evaluation.iloc[0].to_dict()
+    return best, evaluation
+
+
+def train_selected_model_configuration(
+    snapshots: dict[tuple[int, int], pd.DataFrame],
+    settings: Settings,
+    selection: dict[str, Any],
+    *,
+    run_regression: bool = True,
+    run_classification: bool = True,
+    targets: Iterable[str] | None = None,
+    mode: TrainingMode | None = None,
+    verbose: bool = True,
+) -> dict[str, Any]:
+    """Tune and fit exactly the configuration selected by development backtests."""
+    checkpoint = int(selection["Checkpoint"])
+    horizon = int(selection["Horizon"])
+    key = (checkpoint, horizon)
+    snapshot = snapshots.get(key)
+    if snapshot is None or snapshot.empty:
+        raise ValueError(f"Selected snapshot {key} is unavailable.")
+
+    training_window = selection.get("Training_Window_Days")
+    if pd.isna(training_window):
+        training_window = None
+    elif training_window is not None:
+        training_window = int(training_window)
+
+    shared, tuning, tuned_checkpoint, tuned_horizon = tune_shared_hyperparameters(
+        {key: snapshot},
+        settings,
+        run_regression=run_regression,
+        run_classification=run_classification,
+        targets=targets,
+        mode=mode,
+        training_window_days=training_window,
+    )
+    if verbose:
+        print(f"Training selected family day {checkpoint} -> horizon {horizon} ...")
+    bundle, regression, classification, predictions, calibration = train_model_family(
+        snapshot,
+        checkpoint,
+        horizon,
+        shared,
+        tuned_checkpoint,
+        tuned_horizon,
+        settings,
+        run_regression=run_regression,
+        run_classification=run_classification,
+        targets=targets,
+        mode=mode,
+        training_window_days=training_window,
+    )
+    bundle["selected_configuration"] = selection
+    return {
+        "model_bundles": {key: bundle},
+        "regression_evaluation": regression,
+        "classification_evaluation": pd.DataFrame(classification),
+        "classification_calibration": calibration,
+        "hyperparameter_tuning": tuning,
+        "holdout_predictions": predictions,
+        "skipped_configurations": pd.DataFrame(),
+        "selection_evaluation": selection,
+        "training_metadata": {
+            "training_mode": _training_mode(settings, mode),
+            "selection_mode": _setting(settings, "selection_mode", "quick"),
+            "trained_families": 1,
+            "selected_checkpoint": checkpoint,
+            "selected_horizon": horizon,
+            "selected_training_window_days": training_window,
+        },
+    }
 
 
 def train_all_model_families(

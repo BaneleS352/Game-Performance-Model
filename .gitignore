@@ -2,6 +2,8 @@ __pycache__/
 .ipynb_checkpoints/
 .pytest_cache/
 .venv/
+node_modules/
+.pnpm-store/
 artifacts/**/*.pkl
 artifacts/**/*.joblib
 !data/raw/.gitkeep

@@ -3,13 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .features import (
-    PREDICTION_WEEK_END,
-    REGRESSION_TARGETS,
-    build_lifecycle_snapshot,
-    build_week4_snapshot,
-    prepare_features,
-)
+from .features import REGRESSION_TARGETS, build_lifecycle_snapshot, prepare_features
 
 from .modeling import (
     _baseline_prediction,
@@ -30,13 +24,13 @@ def assign_merchandising_recommendation(
     )
 
     predicted_clients = row.get(
-        "predicted_clients_week_4",
-        np.nan,
+        "predicted_clients",
+        row.get("predicted_clients_week_4", np.nan),
     )
 
     predicted_stakes = row.get(
-        "predicted_stakes_week_4",
-        np.nan,
+        "predicted_stakes",
+        row.get("predicted_stakes_week_4", np.nan),
     )
 
     has_positive_activity = (
@@ -51,7 +45,7 @@ def assign_merchandising_recommendation(
         and probability >= 0.80
         and has_positive_activity
     ):
-        return "Priority placement for week 4"
+        return "Priority placement"
 
     if (
         pd.notna(probability)
@@ -59,7 +53,7 @@ def assign_merchandising_recommendation(
         and pd.notna(predicted_stakes)
         and predicted_stakes > 0
     ):
-        return "Increase visibility for week 4"
+        return "Increase visibility"
 
     if (
         pd.notna(probability)
@@ -99,13 +93,15 @@ def score_snapshot(
         "SystemName",
         "First_Observed_Date",
         "Lifecycle_Stage",
+        "Prediction_Start",
+        "Prediction_End",
         "Obs_Window",
         "Horizon",
         "active_observation_days",
         "observation_coverage",
     ]
 
-    result = snapshot[cols].copy()
+    result = snapshot[[column for column in cols if column in snapshot.columns]].copy()
 
     # =========================================================
     # REGRESSION FORECASTS
@@ -182,19 +178,18 @@ def score_snapshot(
             * baseline_pred
         )
 
-        result[
-            f"predicted_{short}_week_4"
-        ] = pred
-
-        prediction_low, prediction_high = prediction_interval_from_table(
+        result[f"predicted_{short}"] = pred
+        result[f"predicted_{short}_low"], result[f"predicted_{short}_high"] = prediction_interval_from_table(
             pred,
-            model_bundle
-            .get(
-                "prediction_interval_tables",
-                {},
-            )
-            .get(target),
+            model_bundle.get("prediction_interval_tables", {}).get(target),
         )
+        result[f"baseline_{short}"] = baseline_pred
+
+        # Keep legacy report consumers working during the generic forecast migration.
+        result[f"predicted_{short}_week_4"] = result[f"predicted_{short}"]
+
+        prediction_low = result[f"predicted_{short}_low"]
+        prediction_high = result[f"predicted_{short}_high"]
 
         result[
             f"predicted_{short}_week_4_low"
@@ -461,19 +456,12 @@ def run_daily_lifecycle_scoring(
             continue
 
         scoring_data = history[history["Game_ID"].isin(eligible_ids)]
-        if checkpoint + horizon == PREDICTION_WEEK_END:
-            snapshot = build_week4_snapshot(
-                scoring_data,
-                checkpoint,
-                require_future=False,
-            )
-        else:
-            snapshot = build_lifecycle_snapshot(
-                scoring_data,
-                checkpoint,
-                horizon,
-                require_future=False,
-            )
+        snapshot = build_lifecycle_snapshot(
+            scoring_data,
+            checkpoint,
+            horizon,
+            require_future=False,
+        )
 
         scores = score_snapshot(snapshot, model_bundle)
         scores["Checkpoint"] = checkpoint

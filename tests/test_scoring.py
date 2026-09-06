@@ -63,6 +63,7 @@ def test_score_snapshot_uses_calibrated_probability_and_bundle_threshold():
     scored = score_snapshot(snapshot, bundle)
 
     assert np.isclose(scored.loc[0, "predicted_clients_week_4"], 24.0)
+    assert np.isclose(scored.loc[0, "predicted_clients"], 24.0)
     assert np.isclose(scored.loc[0, "predicted_clients_week_4_low"], 20.0)
     assert np.isclose(scored.loc[0, "predicted_clients_week_4_high"], 30.0)
     assert np.isclose(scored.loc[0, "confidence_clients"], 0.64)

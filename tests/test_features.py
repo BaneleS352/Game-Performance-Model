@@ -126,6 +126,21 @@ def test_day_21_snapshot_targets_week_4_and_keeps_week_3_observed():
     assert snapshot.loc[0, "target_clients"] == 28
 
 
+def test_day_21_forecast_snapshot_targets_only_days_22_to_28():
+    raw = pd.DataFrame({
+        "Date": pd.date_range("2026-01-01", periods=35),
+        "SystemName": ["SYS"] * 35,
+        "TournamentName": ["Game"] * 35,
+        "Clients": ([1] * 21) + ([10] * 7) + ([100] * 7),
+        "Stakes": [1] * 35,
+    })
+    snapshot = build_lifecycle_snapshot(clean_game_daily(raw), 21, 7, require_future=True)
+
+    assert snapshot.loc[0, "Prediction_Start"] == pd.Timestamp("2026-01-22")
+    assert snapshot.loc[0, "Prediction_End"] == pd.Timestamp("2026-01-28")
+    assert snapshot.loc[0, "target_clients"] == 70
+
+
 def test_betcount_trends_and_weekly_efficiency_growth_reach_model_features():
     raw = pd.DataFrame({
         "Date": pd.date_range("2026-01-01", periods=28),

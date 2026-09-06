@@ -225,6 +225,8 @@ def build_lifecycle_snapshot(
             "Obs_Window": obs_window,
             "Horizon": horizon,
             "Lifecycle_Stage": f"Day {obs_window}",
+            "Prediction_Start": first_observed + pd.to_timedelta(obs_window, unit="D"),
+            "Prediction_End": first_observed + pd.to_timedelta(obs_window + horizon - 1, unit="D"),
             "active_observation_days": int(daily_obs["Date"].nunique()),
             "observation_coverage": daily_obs["Date"].nunique() / obs_window,
         }
@@ -423,9 +425,10 @@ def build_all_historical_snapshots(data: pd.DataFrame, strategy: dict[int, list[
     snapshots = {}
     for checkpoint, horizons in strategy.items():
         for horizon in horizons:
-            if checkpoint + horizon == PREDICTION_WEEK_END:
-                snapshot = build_week4_snapshot(data, checkpoint, require_future=True)
-            else:
-                snapshot = build_lifecycle_snapshot(data, checkpoint, horizon, require_future=True)
-            snapshots[(checkpoint, horizon)] = snapshot
+            snapshots[(checkpoint, horizon)] = build_lifecycle_snapshot(
+                data,
+                checkpoint,
+                horizon,
+                require_future=True,
+            )
     return snapshots

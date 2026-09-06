@@ -150,10 +150,10 @@ def build_holdout_comparison(
     # Error calculations
     # ------------------------------------------------------------------
     for metric in metrics:
-        actual = f"actual_{metric}_week_4"
-        predicted = f"predicted_{metric}_week_4"
-        low = f"predicted_{metric}_week_4_low"
-        high = f"predicted_{metric}_week_4_high"
+        actual = f"actual_{metric}" if f"actual_{metric}" in test.columns else f"actual_{metric}_week_4"
+        predicted = f"predicted_{metric}" if f"predicted_{metric}" in test.columns else f"predicted_{metric}_week_4"
+        low = f"predicted_{metric}_low" if f"predicted_{metric}_low" in test.columns else f"predicted_{metric}_week_4_low"
+        high = f"predicted_{metric}_high" if f"predicted_{metric}_high" in test.columns else f"predicted_{metric}_week_4_high"
 
         if {actual, predicted}.issubset(test.columns):
             variance = test[predicted] - test[actual]
@@ -174,8 +174,8 @@ def build_holdout_comparison(
     off_10 = []
     off_20 = []
     for metric in metrics:
-        actual = f"actual_{metric}_week_4"
-        predicted = f"predicted_{metric}_week_4"
+        actual = f"actual_{metric}" if f"actual_{metric}" in test.columns else f"actual_{metric}_week_4"
+        predicted = f"predicted_{metric}" if f"predicted_{metric}" in test.columns else f"predicted_{metric}_week_4"
         if {actual, predicted}.issubset(test.columns):
             off_10.append(_is_off_by(test[actual], test[predicted], 0.10))
             off_20.append(_is_off_by(test[actual], test[predicted], 0.20))
@@ -224,10 +224,15 @@ def build_holdout_comparison(
                 f"actual_{metric}_week_3",
                 f"actual_{metric}_week_4",
                 f"week_3_to_week_4_{metric}_growth_pct",
+                f"actual_{metric}",
                 f"baseline_{metric}_week_4",
+                f"baseline_{metric}",
                 f"predicted_{metric}_week_4_low",
                 f"predicted_{metric}_week_4",
                 f"predicted_{metric}_week_4_high",
+                f"predicted_{metric}_low",
+                f"predicted_{metric}",
+                f"predicted_{metric}_high",
                 f"confidence_{metric}",
                 f"variance_{metric}",
                 f"probability_{metric}",
@@ -359,10 +364,20 @@ def _forecast_export_columns(forecasts: pd.DataFrame) -> pd.DataFrame:
         "Horizon",
         "active_observation_days",
         "observation_coverage",
+        "actual_clients",
+        "baseline_clients",
+        "predicted_clients_low",
+        "predicted_clients",
+        "predicted_clients_high",
         "predicted_clients_week_4_low",
         "predicted_clients_week_4",
         "predicted_clients_week_4_high",
         "confidence_clients",
+        "actual_stakes",
+        "baseline_stakes",
+        "predicted_stakes_low",
+        "predicted_stakes",
+        "predicted_stakes_high",
         "predicted_stakes_week_4_low",
         "predicted_stakes_week_4",
         "predicted_stakes_week_4_high",
@@ -396,13 +411,13 @@ def _score_calculation_sheet() -> pd.DataFrame:
                 "Metric": "High client performer",
                 "Target field": "is_high_client_performer",
                 "Weight": np.nan,
-                "Calculation note": "Week-4 clients at or above the 80th percentile from the development dataset.",
+                "Calculation note": "Forecast-window clients at or above the 80th percentile from the development dataset.",
             },
             {
                 "Metric": "High stakes performer",
                 "Target field": "is_high_stakes_performer",
                 "Weight": np.nan,
-                "Calculation note": "Week-4 stakes at or above the 80th percentile from the development dataset.",
+                "Calculation note": "Forecast-window stakes at or above the 80th percentile from the development dataset.",
             },
             {
                 "Metric": "Balanced high performer",
@@ -422,6 +437,7 @@ def export_excel(
     regression: pd.DataFrame,
     classification: pd.DataFrame,
     calibration: pd.DataFrame | None = None,
+    configuration_leaderboard: pd.DataFrame | None = None,
 ):
     """Export business/model outputs to an Excel workbook."""
     path = Path(path)
@@ -442,6 +458,8 @@ def export_excel(
         )
         if isinstance(frame, pd.DataFrame) and not frame.empty
     )
+    if isinstance(configuration_leaderboard, pd.DataFrame) and not configuration_leaderboard.empty:
+        sheets.append(("Configuration Selection", configuration_leaderboard))
     sheets.append(("future_performance_score_calculator", _score_calculation_sheet()))
 
     with pd.ExcelWriter(path, engine="openpyxl") as writer:

@@ -1,5 +1,8 @@
 import numpy as np
+import pandas as pd
 
+import game_performance.modeling as modeling
+from game_performance.config import Settings
 from game_performance.modeling import (
     build_confidence_table,
     build_prediction_interval_table,
@@ -7,8 +10,38 @@ from game_performance.modeling import (
     inverse_transform_regression_target,
     prediction_interval_from_table,
     select_classification_threshold,
+    select_best_configuration,
     transform_regression_target,
 )
+
+
+def test_select_best_configuration_uses_development_wape(monkeypatch):
+    dates = pd.date_range("2026-01-01", periods=8)
+    snapshot = pd.DataFrame({
+        "First_Observed_Date": dates.repeat(20),
+        "target_clients": 1.0,
+        "target_stakes": 1.0,
+    })
+
+    def fake_tune(development, target, checkpoint, horizon, categorical, settings, mode=None, training_window_days=None):
+        score = 0.20 if (checkpoint, training_window_days) == (35, 60) else 0.80
+        return {"_target_transform": "raw"}, pd.DataFrame({"Candidate": [1, 1], "WAPE": [score, score]})
+
+    monkeypatch.setattr(modeling, "tune_regressor", fake_tune)
+    settings = Settings(
+        candidate_checkpoints=(21, 35),
+        training_window_days=(None, 60),
+        min_training_rows=10,
+        min_validation_rows=2,
+    )
+
+    best, leaderboard = select_best_configuration(
+        {(21, 7): snapshot, (35, 7): snapshot},
+        settings,
+    )
+
+    assert (best["Checkpoint"], best["Training_Window_Days"]) == (35, 60)
+    assert leaderboard.iloc[0]["Mean_WAPE"] == 0.20
 
 
 def test_confidence_table_calibrates_prediction_ranges():
