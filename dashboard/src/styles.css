@@ -557,6 +557,10 @@ svg {
   margin-top: 20px;
 }
 
+.upload-page .upload-panel {
+  margin: 0;
+}
+
 .sheet-page-heading {
   display: flex;
   align-items: center;
@@ -593,48 +597,26 @@ svg {
 }
 
 .ledger-heading {
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 8px;
+  display: grid;
+  grid-template-columns: minmax(150px, auto) minmax(320px, 1fr) minmax(190px, 240px) minmax(170px, 220px);
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 12px;
 }
 
-.ledger-heading h3 {
-  margin-right: auto;
-}
-
+.ledger-heading h3,
 .ledger-heading label {
-  min-width: min(170px, 100%);
+  min-width: 0;
 }
 
 .ledger-mode {
-  display: inline-flex;
-  min-height: 36px;
-  padding: 3px;
-  border: 1px solid rgba(161, 111, 255, 0.32);
-  border-radius: 8px;
-  background: rgba(8, 11, 24, 0.92);
-}
-
-.ledger-mode button {
-  min-width: 104px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: #e9e6ff;
-  padding: 6px 10px;
-  font-size: 12px;
-  font-weight: 900;
-  cursor: pointer;
-}
-
-.ledger-mode button.active {
-  background: linear-gradient(90deg, var(--pink), var(--purple));
-  box-shadow: 0 0 14px rgba(255, 46, 175, 0.28);
+  width: 100%;
 }
 
 .ledger input,
 .ledger select {
-  min-height: 36px;
+  width: 100%;
+  min-height: 44px;
   border: 1px solid rgba(161, 111, 255, 0.32);
   border-radius: 8px;
   background: #080b18;
@@ -657,6 +639,7 @@ table {
   min-width: 760px;
   border-collapse: collapse;
   font-size: 12px;
+  table-layout: fixed;
 }
 
 th,
@@ -685,7 +668,21 @@ th button {
   text-align: left;
   font-size: 10px;
   font-weight: 900;
+  line-height: 1.25;
   text-transform: uppercase;
+}
+
+.ledger th,
+.ledger td {
+  max-width: none;
+}
+
+.ledger td:first-child {
+  white-space: normal;
+}
+
+.ledger .num {
+  white-space: nowrap;
 }
 
 tbody tr:hover {
@@ -733,6 +730,9 @@ tbody tr:hover {
 }
 
 @media (max-width: 1080px) {
+  .ledger-heading {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 760px) {
@@ -794,6 +794,10 @@ tbody tr:hover {
 
   .donut {
     justify-self: center;
+  }
+
+  .ledger-heading {
+    grid-template-columns: 1fr;
   }
 
   .ledger-heading label,

@@ -17,6 +17,7 @@ const hiddenWorkbookSheets = new Set(["Model Accuracy", "Classification Metrics"
 const workbookSheetLabels = {
   future_performance_score_calcul: "Future Performance Score Calculator",
 };
+const uploadPageName = "__new_workbook__";
 
 const money = new Intl.NumberFormat("en-ZA", {
   style: "currency",
@@ -29,42 +30,69 @@ const ledgerRowHeight = 44;
 const ledgerOverscan = 10;
 const ledgerWindowSize = 34;
 const baseLedgerColumns = [
-  { key: "Game_ID", label: "Game ID", type: "text" },
-  { key: "Lifecycle_Stage", label: "Lifecycle Stage", type: "text" },
-  { key: "Horizon", label: "Horizon", type: "number" },
+  { key: "Game_ID", label: "Game ID", type: "text", width: "280px" },
+  { key: "Lifecycle_Stage", label: "Lifecycle Stage", type: "text", width: "140px" },
+  { key: "Horizon", label: "Horizon", type: "number", width: "90px" },
 ];
+const clientRangeColumn = {
+  key: "predicted_clients_week_4_range",
+  label: "Prediction Clients Week 4 Range",
+  type: "number",
+  width: "260px",
+  sortKey: "predicted_clients_week_4",
+  render: (row) => `${formatValue(row.predicted_clients_week_4_low, "number")} - ${formatValue(row.predicted_clients_week_4_high, "number")}`,
+};
+const stakesRangeColumn = {
+  key: "predicted_stakes_week_4_range",
+  label: "Prediction Stakes Week 4 Range",
+  type: "money",
+  width: "300px",
+  sortKey: "predicted_stakes_week_4",
+  render: (row) => `${formatValue(row.predicted_stakes_week_4_low, "money")} - ${formatValue(row.predicted_stakes_week_4_high, "money")}`,
+};
+const confidenceClientsColumn = { key: "confidence_clients", label: "Confidence Clients", type: "percent", width: "150px" };
+const confidenceStakesColumn = { key: "confidence_stakes", label: "Confidence Stakes", type: "percent", width: "150px" };
 const clientLedgerColumns = [
   ...baseLedgerColumns,
-  {
-    key: "predicted_clients_week_4_range",
-    label: "Prediction Clients Week 4 Range",
-    type: "number",
-    sortKey: "predicted_clients_week_4",
-    render: (row) => `${formatValue(row.predicted_clients_week_4_low, "number")} - ${formatValue(row.predicted_clients_week_4_high, "number")}`,
-  },
-  { key: "confidence_clients", label: "Confidence Clients", type: "percent" },
+  clientRangeColumn,
+  confidenceClientsColumn,
 ];
 const stakesLedgerColumns = [
   ...baseLedgerColumns,
-  {
-    key: "predicted_stakes_week_4_range",
-    label: "Prediction Stakes Week 4 Range",
-    type: "money",
-    sortKey: "predicted_stakes_week_4",
-    render: (row) => `${formatValue(row.predicted_stakes_week_4_low, "money")} - ${formatValue(row.predicted_stakes_week_4_high, "money")}`,
-  },
-  { key: "confidence_stakes", label: "Confidence Stakes", type: "percent" },
+  stakesRangeColumn,
+  confidenceStakesColumn,
+];
+const fullPerformanceLedgerColumns = [
+  ...baseLedgerColumns,
+  clientRangeColumn,
+  stakesRangeColumn,
+  confidenceClientsColumn,
+  confidenceStakesColumn,
 ];
 const ledgerModes = {
+  top_games: {
+    label: "Top Games",
+    sortKey: "combined_performance",
+    direction: "desc",
+    columns: fullPerformanceLedgerColumns,
+  },
   top_stakes: {
     label: "Top Stakes",
     sortKey: "predicted_stakes_week_4",
+    direction: "desc",
     columns: stakesLedgerColumns,
   },
   top_clients: {
     label: "Top Clients",
     sortKey: "predicted_clients_week_4",
+    direction: "desc",
     columns: clientLedgerColumns,
+  },
+  review: {
+    label: "Games to Review",
+    sortKey: "combined_performance",
+    direction: "asc",
+    columns: fullPerformanceLedgerColumns,
   },
 };
 
@@ -98,6 +126,10 @@ function compareValues(a, b, column) {
 
 function sheetLabel(name) {
   return workbookSheetLabels[name] ?? name;
+}
+
+function combinedPerformanceScore(row, maxClients, maxStakes) {
+  return (number(row.predicted_clients_week_4) / maxClients) + (number(row.predicted_stakes_week_4) / maxStakes);
 }
 
 function Dashboard() {
@@ -144,8 +176,8 @@ function DashboardView({ data, onDashboardData }) {
   }));
   const [search, setSearch] = useState("");
   const [system, setSystem] = useState("");
-  const [ledgerMode, setLedgerMode] = useState("top_stakes");
-  const [sort, setSort] = useState("predicted_stakes_week_4");
+  const [ledgerMode, setLedgerMode] = useState("top_games");
+  const [sort, setSort] = useState("combined_performance");
   const [activeSheetName, setActiveSheetName] = useState("");
   const [ledgerScrollTop, setLedgerScrollTop] = useState(0);
 
@@ -161,15 +193,26 @@ function DashboardView({ data, onDashboardData }) {
 
   const rows = useMemo(() => {
     const query = search.trim().toLowerCase();
-    const secondarySort = tieBreakSort(sort);
-    return [...(data.forecasts ?? [])]
+    const activeMode = ledgerModes[ledgerMode];
+    const filteredRows = [...(data.forecasts ?? [])]
       .filter((row) => !system || row.SystemName === system)
       .filter((row) => {
         if (!query) return true;
         return columns.some((column) => String(row[column.key] ?? "").toLowerCase().includes(query));
-      })
-      .sort((a, b) => compareValues(a, b, sort) || compareValues(a, b, secondarySort));
-  }, [columns, search, sort, system]);
+      });
+
+    if (sort === "combined_performance") {
+      const maxClients = Math.max(...filteredRows.map((row) => number(row.predicted_clients_week_4)), 1);
+      const maxStakes = Math.max(...filteredRows.map((row) => number(row.predicted_stakes_week_4)), 1);
+      const direction = activeMode.direction === "asc" ? 1 : -1;
+      return filteredRows.sort((a, b) => (
+        direction * (combinedPerformanceScore(a, maxClients, maxStakes) - combinedPerformanceScore(b, maxClients, maxStakes))
+      ) || compareValues(a, b, tieBreakSort(activeMode.sortKey)));
+    }
+
+    const secondarySort = tieBreakSort(sort);
+    return filteredRows.sort((a, b) => compareValues(a, b, sort) || compareValues(a, b, secondarySort));
+  }, [columns, data.forecasts, ledgerMode, search, sort, system]);
 
   const topSystems = useMemo(
     () => [...(data.systems ?? [])]
@@ -198,8 +241,10 @@ function DashboardView({ data, onDashboardData }) {
       rows: name === "Forecasts" ? data.forecasts ?? [] : [],
     }));
   }, [data]);
-  const activeSheet = workbookSheets.find((sheet) => sheet.name === activeSheetName);
+  const isUploadPage = activeSheetName === uploadPageName;
+  const activeSheet = isUploadPage ? null : workbookSheets.find((sheet) => sheet.name === activeSheetName);
   const selectedColumns = ledgerModes[ledgerMode].columns;
+  const ledgerMinWidth = selectedColumns.reduce((sum, column) => sum + Number.parseInt(column.width, 10), 0);
   const ledgerStart = Math.min(
     Math.max(0, Math.floor(ledgerScrollTop / ledgerRowHeight) - ledgerOverscan),
     Math.max(0, rows.length - ledgerWindowSize),
@@ -236,7 +281,9 @@ function DashboardView({ data, onDashboardData }) {
       </header>
       <WorkbookSheetTabs activeSheetName={activeSheetName} onOpenSheet={openSheet} workbookSheets={workbookSheets} />
 
-      {activeSheet ? (
+      {isUploadPage ? (
+        <UploadPage onDashboardData={onDashboardData} />
+      ) : activeSheet ? (
         <SheetPage sheet={activeSheet} />
       ) : (
         <section className="layout-grid" aria-label="Game forecast dashboard">
@@ -325,22 +372,15 @@ function DashboardView({ data, onDashboardData }) {
           <section className="ledger">
             <div className="ledger-heading">
               <h3><GamepadIcon /> Game Ledger</h3>
-              <div className="ledger-mode" aria-label="Ledger ranking mode">
-                {Object.entries(ledgerModes).map(([mode, config]) => (
-                  <button
-                    aria-pressed={ledgerMode === mode}
-                    className={ledgerMode === mode ? "active" : ""}
-                    key={mode}
-                    onClick={() => changeLedgerMode(mode)}
-                    type="button"
-                  >
-                    {config.label}
-                  </button>
-                ))}
-              </div>
               <label>
                 <span className="sr-only">Search all columns</span>
                 <input value={search} onChange={(event) => setSearch(event.target.value)} type="search" placeholder="Search games or systems" />
+              </label>
+              <label className="ledger-mode">
+                <span className="sr-only">Ledger ranking mode</span>
+                <select value={ledgerMode} onChange={(event) => changeLedgerMode(event.target.value)}>
+                  {Object.entries(ledgerModes).map(([mode, config]) => <option key={mode} value={mode}>{config.label}</option>)}
+                </select>
               </label>
               <label>
                 <span className="sr-only">Filter by system</span>
@@ -351,7 +391,10 @@ function DashboardView({ data, onDashboardData }) {
               </label>
             </div>
             <div className="table-wrap" onScroll={(event) => setLedgerScrollTop(event.currentTarget.scrollTop)}>
-              <table style={{ minWidth: `${Math.max(860, selectedColumns.length * 150)}px` }}>
+              <table style={{ minWidth: `${Math.max(860, ledgerMinWidth)}px` }}>
+                <colgroup>
+                  {selectedColumns.map((column) => <col key={column.key} style={{ width: column.width }} />)}
+                </colgroup>
                 <thead>
                   <tr>
                     {selectedColumns.map((column) => (
@@ -398,7 +441,6 @@ function DashboardView({ data, onDashboardData }) {
           </section>
         </section>
       )}
-      <UploadPanel onDashboardData={onDashboardData} />
     </main>
   );
 }
@@ -517,7 +559,25 @@ function WorkbookSheetTabs({ workbookSheets, activeSheetName, onOpenSheet }) {
           <SheetIcon /> {sheetLabel(sheet.name)}
         </button>
       ))}
+      <button className={activeSheetName === uploadPageName ? "active" : ""} type="button" onClick={() => onOpenSheet(uploadPageName)}>
+        <SheetIcon /> New Workbook
+      </button>
     </nav>
+  );
+}
+
+function UploadPage({ onDashboardData }) {
+  return (
+    <section className="sheet-page quest-card upload-page" aria-label="New workbook">
+      <div className="sheet-page-heading">
+        <span className="badge-icon"><SheetIcon /></span>
+        <div>
+          <h2>New Workbook</h2>
+          <p>Upload a workbook, choose a worksheet, and score it with the trained model.</p>
+        </div>
+      </div>
+      <UploadPanel onDashboardData={onDashboardData} />
+    </section>
   );
 }
 
