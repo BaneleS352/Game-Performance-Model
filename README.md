@@ -22,35 +22,6 @@ src/game_performance/
  tests/
 ```
 
-## Key corrections from the original notebook
-
-1. **Fixed destructive numeric cleaning order.** Currency/percentage text is stripped before numeric coercion; formatted values are no longer converted to `NaN` prematurely.
-2. **Removed `globals().update(...)`.** Every notebook loads named artifacts explicitly, making dependencies inspectable and reproducible.
-3. **Moved reusable functions out of notebooks.** Feature engineering, validation, modeling, scoring, and reporting now have single sources of truth.
-4. **Strengthened leakage controls.** Holdout target scoring uses distributions and missing-value medians learned from development data only.
-5. **Separated live features from future targets.** `require_future=False` never emits `target_*` columns.
-6. **Replaced hard-coded Windows source path.** Set `GAME_DATA_FILE` or use the default `data/raw/game_performance.xlsx`.
-7. **Added schema checks, tests, package metadata, and deterministic settings.**
-8. **Added accuracy-first lifecycle selection.** The pipeline compares checkpoints at days 21, 28, 35, 42, 49, and 56 for the next seven days, using rolling temporal validation and recent-versus-expanding training windows.
-
-## Execution order
-
-```bash
-python -m pip install -e .
-export GAME_DATA_FILE=/path/to/Tournament_Daily_Dataset.xlsx
-jupyter lab
-```
-
-Run notebooks in numeric order. Each stage writes an explicit artifact used by the next stage.
-
-## Artifact contract
-
-- `artifacts/processed/clean_game_daily.pkl`
-- `artifacts/features/historical_snapshots.joblib`
-- `artifacts/models/training_results.joblib`
-- `artifacts/reports/current_predictions.pkl`
-- `artifacts/reports/model_business_report.xlsx`
-
 ## Dashboard
 
 The dashboard is a React/Vite static app that reads the exported workbook data

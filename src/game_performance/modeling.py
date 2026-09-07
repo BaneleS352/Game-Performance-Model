@@ -938,38 +938,114 @@ def tune_regressor(
     categorical: list[str],
     settings: Settings,
     mode: TrainingMode | None = None,
+    training_window_days: int | None = None,
 ) -> tuple[dict[str, Any], pd.DataFrame]:
+    """
+    Tune a CatBoost regressor using rolling date validation.
+
+    Parameters
+    ----------
+    development:
+        Development/training dataset.
+    target:
+        Regression target column.
+    checkpoint:
+        Lifecycle observation checkpoint.
+    horizon:
+        Forecast horizon.
+    categorical:
+        Categorical feature columns.
+    settings:
+        Project Settings object.
+    mode:
+        Training mode: quick, standard, or production.
+    training_window_days:
+        Optional rolling training-window restriction.
+    """
     records: list[dict[str, Any]] = []
     best_params: dict[str, Any] | None = None
     best_score = np.inf
 
-    folds = _adaptive_rolling_date_splits(development, settings)
+    # IMPORTANT:
+    # Pass training_window_days into the rolling validation splitter.
+    folds = _adaptive_rolling_date_splits(
+        development,
+        settings,
+        training_window_days,
+    )
 
-    for candidate_id, params in enumerate(_limit_candidates(REGRESSOR_PARAMETER_CANDIDATES, settings, mode), 1):
+    for candidate_id, params in enumerate(
+        _limit_candidates(
+            REGRESSOR_PARAMETER_CANDIDATES,
+            settings,
+            mode,
+        ),
+        1,
+    ):
         scores: list[float] = []
+
         for fold_number, (train, validation) in enumerate(folds, 1):
             train = train.dropna(subset=[target]).copy()
             validation = validation.dropna(subset=[target]).copy()
+
             if train.empty or validation.empty:
                 continue
 
-            model = _build_regressor(params, settings, mode)
-            transform = _target_transform(params, target)
-            _fit_regressor(model, train, validation, target, categorical, settings, mode, transform)
-            prediction = _prediction_from_fit(
+            model = _build_regressor(
+                params,
+                settings,
+                mode,
+            )
+
+            transform = _target_transform(
+                params,
                 target,
-                model.predict(prepare_features(validation, categorical)),
+            )
+
+            _fit_regressor(
+                model,
+                train,
+                validation,
+                target,
+                categorical,
+                settings,
+                mode,
                 transform,
             )
-            metrics = regression_metrics(validation[target], prediction)
-            selection_score = metrics["WAPE"] if pd.notna(metrics["WAPE"]) else metrics["MAE"]
-            scores.append(float(selection_score))
+
+            prediction = _prediction_from_fit(
+                target,
+                model.predict(
+                    prepare_features(
+                        validation,
+                        categorical,
+                    )
+                ),
+                transform,
+            )
+
+            metrics = regression_metrics(
+                validation[target],
+                prediction,
+            )
+
+            selection_score = (
+                metrics["WAPE"]
+                if pd.notna(metrics["WAPE"])
+                else metrics["MAE"]
+            )
+
+            scores.append(
+                float(selection_score)
+            )
+
             records.append(
                 {
                     "Checkpoint": checkpoint,
                     "Horizon": horizon,
                     "Target": target,
                     "Target_Transform": transform,
+                    "Training_Window_Days": training_window_days,
                     "Candidate": candidate_id,
                     "Fold": fold_number,
                     "Best_Iteration": model.get_best_iteration(),
@@ -978,15 +1054,20 @@ def tune_regressor(
                 }
             )
 
-        if scores and float(np.mean(scores)) < best_score:
-            best_score = float(np.mean(scores))
-            best_params = params.copy()
+        if scores:
+            mean_score = float(np.mean(scores))
+
+            if mean_score < best_score:
+                best_score = mean_score
+                best_params = params.copy()
 
     if best_params is None:
-        raise ValueError(f"Unable to tune {target} for day {checkpoint}, horizon {horizon}.")
+        raise ValueError(
+            f"Unable to tune {target} for "
+            f"day {checkpoint}, horizon {horizon}."
+        )
 
     return best_params, pd.DataFrame(records)
-
 
 def tune_classifier(
     development: pd.DataFrame,
