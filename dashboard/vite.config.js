@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -22,6 +23,18 @@ export default defineConfig({
           response.setHeader("Content-Type", "text/javascript");
           response.end(readFileSync(dashboardDataPath, "utf8"));
         });
+      },
+    },
+    {
+      name: "local-dashboard-api",
+      configureServer(server) {
+        const api = spawn(process.env.PYTHON ?? "python", ["-m", "game_performance.server"], {
+          cwd: resolve(__dirname, ".."),
+          env: { ...process.env, PYTHONPATH: resolve(__dirname, "../src") },
+          stdio: "inherit",
+          windowsHide: true,
+        });
+        server.httpServer?.once("close", () => api.kill());
       },
     },
   ],
