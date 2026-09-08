@@ -11,9 +11,7 @@ REQUIRED_COLUMNS = {
     "SystemName",
     "TournamentName",
     "Clients",
-    "Betcount",
     "Stakes",
-    "GGR",
 }
 
 
@@ -98,10 +96,9 @@ def clean_game_daily(
     result.attrs["invalid_date_rows"] = invalid_dates
 
     # Numeric fields
-    result["Clients"] = _clean_numeric_text(result["Clients"])
-    result["Betcount"] = _clean_numeric_text(result["Betcount"])
-    result["Stakes"] = _clean_numeric_text(result["Stakes"])
-    result["GGR"] = _clean_numeric_text(result["GGR"])
+    for column in ("Clients", "Betcount", "Stakes", "GGR"):
+        if column in result.columns:
+            result[column] = _clean_numeric_text(result[column])
 
     if "GGR_Perc" in result.columns:
         result["GGR_Perc"] = _clean_numeric_text(
@@ -152,11 +149,12 @@ def clean_game_daily(
     ).dt.days + 1
 
     # Recalculated GGR percentage
-    result["GGR_Perc_Calc"] = np.where(
-        result["Stakes"].ne(0),
-        result["GGR"] / result["Stakes"],
-        np.nan,
-    )
+    if {"GGR", "Stakes"}.issubset(result.columns):
+        result["GGR_Perc_Calc"] = np.where(
+            result["Stakes"].ne(0),
+            result["GGR"] / result["Stakes"],
+            np.nan,
+        )
 
     return result.replace(
         [np.inf, -np.inf],

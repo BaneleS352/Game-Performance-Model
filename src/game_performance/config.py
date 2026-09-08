@@ -11,18 +11,22 @@ class Settings:
     source_file: Path = field(default_factory=lambda: Path(os.getenv("GAME_DATA_FILE", "data/raw/game_performance.xlsx")))
     random_seed: int = 42
     high_performer_percentile: float = 0.80
-    rolling_validation_folds: int = 2
+    rolling_validation_folds: int = 4
     final_test_fraction: float = 0.15
     min_training_rows: int = 100
     min_validation_rows: int = 25
-    representative_tuning_checkpoint: int = 14
-    representative_tuning_horizon: int = 30
+    min_calibration_rows: int = 50
+    calibration_bins: int = 10
+    forecast_horizon: int = 7
+    candidate_checkpoints: tuple[int, ...] = (21, 28, 35, 42, 49, 56)
+    training_window_days: tuple[int | None, ...] = (None, 30, 60, 90, 120)
+    selection_mode: str = "quick"
+    representative_tuning_checkpoint: int = 21
+    representative_tuning_horizon: int = 7
 
-    horizon_strategy: dict[int, list[int]] = field(default_factory=lambda: {
-        7: [7, 14, 30],
-        14: [7, 14, 30, 60],
-        21: [14, 30, 60],
-    })
+    @property
+    def horizon_strategy(self) -> dict[int, list[int]]:
+        return {checkpoint: [self.forecast_horizon] for checkpoint in self.candidate_checkpoints}
 
     def __post_init__(self) -> None:
         if not self.source_file.is_absolute():

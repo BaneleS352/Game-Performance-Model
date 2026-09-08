@@ -4,6 +4,11 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
+BUSINESS_GOAL_TARGETS = {
+    "clients": ("target_clients", "is_high_client_performer"),
+    "stakes": ("target_stakes", "is_high_stakes_performer"),
+}
+
 
 def split_development_and_holdout(snapshot: pd.DataFrame, test_fraction: float = 0.15):
     data = snapshot.dropna(subset=["First_Observed_Date"]).copy()
@@ -21,12 +26,28 @@ def split_development_and_holdout(snapshot: pd.DataFrame, test_fraction: float =
     )
 
 
+def restrict_training_window(
+    development: pd.DataFrame,
+    window_days: int | None,
+    *,
+    reference_date: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """Keep all history or only the requested recent launch-date window."""
+    if window_days is None or development.empty:
+        return development.copy()
+    dates = pd.to_datetime(development["First_Observed_Date"], errors="coerce")
+    reference = pd.Timestamp(reference_date) if reference_date is not None else dates.max()
+    cutoff = reference - pd.Timedelta(days=int(window_days) - 1)
+    return development.loc[dates.ge(cutoff)].copy()
+
+
 def rolling_date_splits(
     development: pd.DataFrame,
     *,
     n_splits: int,
     min_training_rows: int,
     min_validation_rows: int,
+    training_window_days: int | None = None,
 ):
     dates = np.sort(pd.to_datetime(development["First_Observed_Date"]).dropna().unique())
     if len(dates) < n_splits + 2:
@@ -38,6 +59,12 @@ def rolling_date_splits(
         validation_dates = blocks[i]
         train = development[development["First_Observed_Date"].isin(train_dates)].copy()
         validation = development[development["First_Observed_Date"].isin(validation_dates)].copy()
+        if training_window_days is not None and not validation.empty:
+            train = restrict_training_window(
+                train,
+                training_window_days,
+                reference_date=pd.Timestamp(validation_dates[0]),
+            )
         if len(train) >= min_training_rows and len(validation) >= min_validation_rows:
             folds.append((train, validation))
     if not folds:
@@ -62,16 +89,19 @@ def create_high_performance_target(
     holdout: pd.DataFrame,
     percentile: float = 0.80,
 ):
-    """Fit score references on development only, then apply them to holdout."""
-    weights = {
-        "target_ggr": 0.40,
-        "target_stakes": 0.25,
-        "target_clients": 0.15,
-        "target_betcount": 0.10,
-        "target_ggr_pct": 0.10,
+    """Fit business-goal thresholds on development only, then apply them to holdout."""
+    references = {
+        metric: np.sort(development[metric].dropna().to_numpy())
+        for metric, _ in BUSINESS_GOAL_TARGETS.values()
     }
-    references = {metric: np.sort(development[metric].dropna().to_numpy()) for metric in weights}
-    medians = {metric: development[metric].median() for metric in weights}
+    medians = {
+        metric: development[metric].median()
+        for metric, _ in BUSINESS_GOAL_TARGETS.values()
+    }
+    thresholds = {
+        flag: float(development[metric].quantile(percentile))
+        for metric, flag in BUSINESS_GOAL_TARGETS.values()
+    }
 
     def empirical_percentile(values, reference):
         if len(reference) == 0:
@@ -81,16 +111,19 @@ def create_high_performance_target(
     def score(frame):
         result = frame.copy()
         composite = np.zeros(len(result), dtype=float)
-        for metric, weight in weights.items():
+        for metric, flag in BUSINESS_GOAL_TARGETS.values():
             # Important: holdout missing values use development medians, not holdout medians.
             values = pd.to_numeric(result[metric], errors="coerce").fillna(medians[metric])
-            composite += weight * empirical_percentile(values, references[metric])
+            composite += 0.50 * empirical_percentile(values, references[metric])
+            result[flag] = values.ge(thresholds[flag]).astype(int)
+        result["is_balanced_high_performer"] = (
+            result["is_high_client_performer"].eq(1)
+            & result["is_high_stakes_performer"].eq(1)
+        ).astype(int)
         result["future_performance_score"] = composite
+        result["is_high_performer"] = result["is_balanced_high_performer"]
         return result
 
     development_scored = score(development)
     holdout_scored = score(holdout)
-    threshold = float(development_scored["future_performance_score"].quantile(percentile))
-    development_scored["is_high_performer"] = (development_scored["future_performance_score"] >= threshold).astype(int)
-    holdout_scored["is_high_performer"] = (holdout_scored["future_performance_score"] >= threshold).astype(int)
-    return development_scored, holdout_scored, threshold
+    return development_scored, holdout_scored, thresholds
