@@ -52,6 +52,8 @@ def load_raw_workbook(path: str | Path, sheet_name: int | str = 0) -> pd.DataFra
             f"Source workbook not found: {path}. Set GAME_DATA_FILE to the correct path."
         )
 
+    if path.suffix.lower() == ".csv":
+        return pd.read_csv(path)
     return pd.read_excel(path, sheet_name=sheet_name)
 
 

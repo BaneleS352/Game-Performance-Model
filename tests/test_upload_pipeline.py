@@ -37,7 +37,7 @@ def _forecasts() -> pd.DataFrame:
 
 
 def test_save_uploaded_workbook_rejects_non_xlsx_and_sanitizes_name(tmp_path):
-    with pytest.raises(ValueError, match=".xlsx"):
+    with pytest.raises(ValueError, match="CSV or Excel"):
         upload_pipeline.save_uploaded_workbook(tmp_path, "scores.csv", b"data")
 
     source = tmp_path / "source.xlsx"

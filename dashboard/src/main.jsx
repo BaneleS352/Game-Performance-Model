@@ -519,8 +519,8 @@ function UploadPanel({ onDashboardData }) {
       </div>
       <div className="upload-controls">
         <label className="file-input">
-          <span>Workbook (.xlsx)</span>
-          <input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" onChange={chooseWorkbook} disabled={busy} />
+          <span>Spreadsheet</span>
+          <input type="file" accept=".csv,.xls,.xlsx,.xlsb,.xlsm,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12" onChange={chooseWorkbook} disabled={busy} />
         </label>
         <label>
           <span>Worksheet</span>

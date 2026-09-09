@@ -50,4 +50,4 @@ pnpm install
 pnpm dev
 ```
 
-Open `http://127.0.0.1:5173`, choose an `.xlsx` workbook and worksheet, then run the existing trained model. The selected sheet must include `Date`, `SystemName`, `TournamentName`, `Clients`, and `Stakes` columns. Each upload and generated report is kept under `data/uploads/` and `artifacts/uploads/`; the dashboard shows the latest successful run.
+Open `http://127.0.0.1:5173`, choose a CSV or Excel file (`.csv`, `.xls`, `.xlsx`, `.xlsb`, or `.xlsm`) and worksheet, then run the existing trained model. The selected sheet must include `Date`, `SystemName`, `TournamentName`, `Clients`, and `Stakes` columns. Each upload and generated report is kept under `data/uploads/` and `artifacts/uploads/`; the dashboard shows the latest successful run.

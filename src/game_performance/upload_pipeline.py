@@ -7,9 +7,7 @@ import os
 import re
 import shutil
 import uuid
-import zipfile
 from datetime import UTC, datetime
-from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -21,17 +19,20 @@ from .io import load_artifact, save_dataframe
 from .reporting import build_holdout_comparison, export_excel
 from .scoring import run_daily_lifecycle_scoring
 
+SUPPORTED_UPLOAD_EXTENSIONS = {".csv", ".xls", ".xlsx", ".xlsb", ".xlsm"}
+
 
 def safe_workbook_filename(filename: str) -> str:
-    """Return a safe .xlsx filename suitable for local storage."""
+    """Return a safe spreadsheet filename suitable for local storage."""
     name = Path(filename).name.strip()
-    if Path(name).suffix.lower() != ".xlsx":
-        raise ValueError("Upload an Excel workbook with a .xlsx extension.")
+    suffix = Path(name).suffix.lower()
+    if suffix not in SUPPORTED_UPLOAD_EXTENSIONS:
+        raise ValueError("Upload a CSV or Excel file (.csv, .xls, .xlsx, .xlsb, or .xlsm).")
 
     stem = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(name).stem).strip("._")
     if not stem:
         raise ValueError("The workbook filename must contain letters or numbers.")
-    return f"{stem}.xlsx"
+    return f"{stem}{suffix}"
 
 
 def save_uploaded_workbook(
@@ -39,11 +40,9 @@ def save_uploaded_workbook(
     filename: str,
     contents: bytes,
 ) -> tuple[str, Path]:
-    """Save an uploaded .xlsx workbook and return its id and path."""
+    """Save an uploaded spreadsheet and return its id and path."""
     if not contents:
-        raise ValueError("The uploaded workbook is empty.")
-    if not zipfile.is_zipfile(BytesIO(contents)):
-        raise ValueError("The uploaded file is not a valid .xlsx workbook.")
+        raise ValueError("The uploaded spreadsheet is empty.")
 
     safe_name = safe_workbook_filename(filename)
     upload_id = f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}_{uuid.uuid4().hex[:8]}"
@@ -55,7 +54,10 @@ def save_uploaded_workbook(
 
 
 def workbook_sheets(path: str | Path) -> list[str]:
-    """Return the worksheet names available to score."""
+    """Return worksheet names, using one sheet for CSV files."""
+    path = Path(path)
+    if path.suffix.lower() == ".csv":
+        return [path.stem]
     return pd.ExcelFile(path).sheet_names
 
 
