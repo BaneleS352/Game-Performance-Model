@@ -10,6 +10,53 @@ BUSINESS_GOAL_TARGETS = {
 }
 
 
+def split_training_validation_holdout(
+    snapshot: pd.DataFrame,
+    *,
+    training_fraction: float = 0.70,
+    validation_fraction: float = 0.15,
+    holdout_fraction: float = 0.15,
+    date_column: str = "First_Observed_Date",
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, object]]:
+    """Split chronological data by unique dates into train, validation, and holdout sets."""
+    fractions = np.asarray((training_fraction, validation_fraction, holdout_fraction), dtype=float)
+    if np.any(fractions <= 0) or not np.isclose(fractions.sum(), 1.0):
+        raise ValueError("Training, validation, and holdout fractions must be positive and sum to 1.")
+    if date_column not in snapshot:
+        raise KeyError(f"Missing temporal split column: {date_column}")
+
+    data = snapshot.dropna(subset=[date_column]).copy()
+    data[date_column] = pd.to_datetime(data[date_column])
+    data = data.sort_values(date_column).reset_index(drop=True)
+    dates = np.sort(data[date_column].unique())
+    if len(dates) < 3:
+        raise ValueError("At least three unique dates are required for temporal training, validation, and holdout splits.")
+
+    counts = np.floor(len(dates) * fractions).astype(int)
+    for index in np.argsort(-(len(dates) * fractions - counts), kind="stable")[: len(dates) - counts.sum()]:
+        counts[index] += 1
+    for index in np.flatnonzero(counts == 0):
+        donor = int(np.argmax(counts))
+        counts[donor] -= 1
+        counts[index] += 1
+
+    training_dates, validation_dates, holdout_dates = np.split(dates, np.cumsum(counts)[:-1])
+    training = data[data[date_column].isin(training_dates)].copy()
+    validation = data[data[date_column].isin(validation_dates)].copy()
+    holdout = data[data[date_column].isin(holdout_dates)].copy()
+    metadata = {
+        "date_column": date_column,
+        "total_days": int(len(dates)),
+        "training_days": int(len(training_dates)),
+        "validation_days": int(len(validation_dates)),
+        "holdout_days": int(len(holdout_dates)),
+        "training_start": pd.Timestamp(training_dates[0]),
+        "validation_start": pd.Timestamp(validation_dates[0]),
+        "holdout_start": pd.Timestamp(holdout_dates[0]),
+    }
+    return training, validation, holdout, metadata
+
+
 def split_development_and_holdout(snapshot: pd.DataFrame, test_fraction: float = 0.15):
     data = snapshot.dropna(subset=["First_Observed_Date"]).copy()
     data["First_Observed_Date"] = pd.to_datetime(data["First_Observed_Date"])

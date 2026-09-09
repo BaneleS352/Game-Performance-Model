@@ -10,13 +10,19 @@ OPTIONAL_METADATA_CANDIDATES = [
     "Theme", "Volatility", "RTP", "Market", "Country", "Brand", "DeviceType",
 ]
 
-REGRESSION_TARGETS = ["target_clients", "target_stakes"]
+# Forecast commercial drivers, then derive the monetary outputs from them.  The
+# raw outcome targets stay on historical snapshots for holdout evaluation.
+COMMERCIAL_DRIVER_TARGETS = [
+    "target_clients",
+    "target_bets_per_client",
+    "target_stake_per_bet",
+    "target_ggr_margin",
+]
+OUTCOME_TARGETS = ["target_clients", "target_betcount", "target_stakes", "target_ggr"]
+REGRESSION_TARGETS = COMMERCIAL_DRIVER_TARGETS
 OBSERVATION_WINDOW_DAYS = 14
 DAY_21_OBSERVATION_WINDOW_DAYS = 21
-VALIDATION_WEEK_START = 15
-VALIDATION_WEEK_END = 21
-PREDICTION_WEEK_START = 22
-PREDICTION_WEEK_END = 28
+FORECAST_HORIZON_DAYS = 7
 
 BASE_CATEGORICAL_FEATURES = [
     "SystemName",
@@ -31,23 +37,27 @@ BASE_CATEGORICAL_FEATURES = [
 BASE_NUMERIC_FEATURES = [
     "Obs_Window", "Horizon",
     "Observation_End_DayOfMonth", "Observation_End_WeekOfYear",
-    "obs_clients_sum", "obs_stakes_sum", "obs_betcount_sum",
+    "obs_clients_sum", "obs_stakes_sum", "obs_betcount_sum", "obs_ggr_sum",
     "clients_week_1_sum", "clients_week_2_sum", "clients_week_3_sum",
     "clients_week_1_to_2_growth", "clients_week_2_to_3_growth",
     "stakes_week_1_sum", "stakes_week_2_sum", "stakes_week_3_sum",
     "stakes_week_1_to_2_growth", "stakes_week_2_to_3_growth",
     "betcount_week_1_sum", "betcount_week_2_sum", "betcount_week_3_sum",
     "betcount_week_1_to_2_growth", "betcount_week_2_to_3_growth",
+    "ggr_week_1_sum", "ggr_week_2_sum", "ggr_week_3_sum",
+    "ggr_week_1_to_2_growth", "ggr_week_2_to_3_growth",
     "stake_per_client_week_1", "stake_per_client_week_2", "stake_per_client_week_3",
     "stake_per_client_week_1_to_2_growth", "stake_per_client_week_2_to_3_growth",
     "bets_per_client", "bets_per_client_week_1", "bets_per_client_week_2", "bets_per_client_week_3",
     "bets_per_client_week_1_to_2_growth", "bets_per_client_week_2_to_3_growth",
     "stake_per_bet", "stake_per_bet_week_1", "stake_per_bet_week_2", "stake_per_bet_week_3",
     "stake_per_bet_week_1_to_2_growth", "stake_per_bet_week_2_to_3_growth",
+    "ggr_margin", "ggr_margin_week_1", "ggr_margin_week_2", "ggr_margin_week_3",
     "log_obs_clients_sum", "log_obs_stakes_sum", "log_obs_betcount_sum",
     "log_clients_week_2_sum", "log_clients_week_3_sum",
     "log_stakes_week_2_sum", "log_stakes_week_3_sum",
     "log_betcount_week_2_sum", "log_betcount_week_3_sum",
+    "log_obs_ggr_sum", "log_ggr_week_2_sum", "log_ggr_week_3_sum",
     "obs_clients_mean", "obs_stakes_mean", "obs_betcount_mean",
     "obs_clients_std", "obs_stakes_std", "obs_betcount_std",
     "clients_first", "stakes_first",
@@ -69,6 +79,9 @@ BASE_NUMERIC_FEATURES = [
     "betcount_slope", "betcount_growth", "betcount_last_3_mean", "betcount_last_7_mean",
     "betcount_recent_to_early_ratio", "betcount_recent_share", "betcount_peak",
     "days_since_betcount_peak", "betcount_zero_days", "betcount_positive_days",
+    "ggr_first", "ggr_last", "ggr_median", "ggr_cv", "ggr_slope", "ggr_growth",
+    "ggr_last_3_mean", "ggr_last_7_mean", "ggr_recent_to_early_ratio", "ggr_recent_share",
+    "ggr_peak", "days_since_ggr_peak", "ggr_zero_days", "ggr_positive_days",
     "active_observation_days", "observation_coverage",
 ]
 
@@ -171,8 +184,13 @@ def build_lifecycle_snapshot(
     horizon: int,
     *,
     require_future: bool = True,
+    as_of_date: pd.Timestamp | None = None,
 ) -> pd.DataFrame:
-    """Build one point-in-time row per game for a checkpoint/horizon pair."""
+    """Build one point-in-time row per game for an observation window and horizon.
+
+    With ``as_of_date``, the observation window ends on that date and the
+    target/forecast period is the following ``horizon`` calendar days.
+    """
     required = {
         "Game_ID", "Date", "Days_Since_First_Observed", "First_Observed_Date",
         "SystemName", "TournamentName", "Clients", "Stakes",
@@ -182,22 +200,37 @@ def build_lifecycle_snapshot(
         raise KeyError(f"Missing required columns: {sorted(missing)}")
 
     optional_metadata = available_optional_metadata(data)
+    as_of_date = pd.Timestamp(as_of_date).normalize() if as_of_date is not None else None
     rows: list[dict[str, object]] = []
 
     for game_id, game in data.groupby("Game_ID", sort=False):
         game = game.sort_values("Date").copy()
+        first_observed = pd.to_datetime(game["First_Observed_Date"].iloc[0])
         max_age = game["Days_Since_First_Observed"].max()
-        if pd.isna(max_age) or max_age < obs_window:
+        if pd.isna(max_age):
             continue
-        if require_future and max_age < obs_window + horizon:
+        if as_of_date is None:
+            observation_start_age = 1
+            observation_end_age = obs_window
+            observation_end = first_observed + pd.to_timedelta(obs_window - 1, unit="D")
+        else:
+            observation_end_age = (as_of_date - first_observed).days + 1
+            observation_start_age = observation_end_age - obs_window + 1
+            observation_end = as_of_date
+        if observation_start_age < 1:
+            continue
+        if require_future and max_age < observation_end_age + horizon:
             continue
 
-        obs = game[game["Days_Since_First_Observed"].between(1, obs_window)].copy()
-        future = game[game["Days_Since_First_Observed"].between(obs_window + 1, obs_window + horizon)].copy()
+        obs = game[game["Days_Since_First_Observed"].between(observation_start_age, observation_end_age)].copy()
+        future = game[
+            game["Days_Since_First_Observed"].between(observation_end_age + 1, observation_end_age + horizon)
+        ].copy()
         if obs.empty or (require_future and future.empty):
             continue
+        obs["_window_day"] = obs["Days_Since_First_Observed"] - observation_start_age + 1
 
-        aggregations = {"Clients": "sum", "Stakes": "sum"}
+        aggregations = {"Clients": "sum", "Stakes": "sum", "GGR": "sum"}
         if "Betcount" in obs.columns:
             aggregations["Betcount"] = "sum"
 
@@ -207,8 +240,6 @@ def build_lifecycle_snapshot(
             .sort_values("Date")
             .reset_index(drop=True)
         )
-        first_observed = pd.to_datetime(game["First_Observed_Date"].iloc[0])
-        observation_end = first_observed + pd.to_timedelta(obs_window - 1, unit="D")
         row: dict[str, object] = {
             "Game_ID": game_id,
             "SystemName": obs["SystemName"].iloc[0],
@@ -224,9 +255,9 @@ def build_lifecycle_snapshot(
             ),
             "Obs_Window": obs_window,
             "Horizon": horizon,
-            "Lifecycle_Stage": f"Day {obs_window}",
-            "Prediction_Start": first_observed + pd.to_timedelta(obs_window, unit="D"),
-            "Prediction_End": first_observed + pd.to_timedelta(obs_window + horizon - 1, unit="D"),
+            "Lifecycle_Stage": f"Latest {obs_window}-day window" if as_of_date is not None else f"Day {obs_window}",
+            "Prediction_Start": observation_end + pd.Timedelta(days=1),
+            "Prediction_End": observation_end + pd.Timedelta(days=horizon),
             "active_observation_days": int(daily_obs["Date"].nunique()),
             "observation_coverage": daily_obs["Date"].nunique() / obs_window,
         }
@@ -235,7 +266,7 @@ def build_lifecycle_snapshot(
             non_missing = obs[column].dropna()
             row[column] = non_missing.iloc[0] if not non_missing.empty else "Unknown"
 
-        for source, prefix in (("Clients", "clients"), ("Stakes", "stakes"), ("Betcount", "betcount")):
+        for source, prefix in (("Clients", "clients"), ("Stakes", "stakes"), ("Betcount", "betcount"), ("GGR", "ggr")):
             if source not in daily_obs.columns:
                 continue
             series = daily_obs[source]
@@ -260,9 +291,9 @@ def build_lifecycle_snapshot(
 
         row["stake_per_client"] = _safe_divide(row["obs_stakes_sum"], row["obs_clients_sum"])
 
-        week_1_obs = obs[obs["Days_Since_First_Observed"].between(1, 7)]
-        week_2_obs = obs[obs["Days_Since_First_Observed"].between(8, min(14, obs_window))]
-        week_3_obs = obs[obs["Days_Since_First_Observed"].between(15, min(21, obs_window))]
+        week_1_obs = obs[obs["_window_day"].between(1, 7)]
+        week_2_obs = obs[obs["_window_day"].between(8, min(14, obs_window))]
+        week_3_obs = obs[obs["_window_day"].between(15, min(21, obs_window))]
         clients_week_1 = week_1_obs["Clients"].sum(min_count=1)
         clients_week_2 = week_2_obs["Clients"].sum(min_count=1)
         clients_week_3 = week_3_obs["Clients"].sum(min_count=1)
@@ -272,6 +303,9 @@ def build_lifecycle_snapshot(
         betcount_week_1 = week_1_obs["Betcount"].sum(min_count=1) if "Betcount" in week_1_obs else np.nan
         betcount_week_2 = week_2_obs["Betcount"].sum(min_count=1) if "Betcount" in week_2_obs else np.nan
         betcount_week_3 = week_3_obs["Betcount"].sum(min_count=1) if "Betcount" in week_3_obs else np.nan
+        ggr_week_1 = week_1_obs["GGR"].sum(min_count=1)
+        ggr_week_2 = week_2_obs["GGR"].sum(min_count=1)
+        ggr_week_3 = week_3_obs["GGR"].sum(min_count=1)
 
         row["clients_week_1_sum"] = clients_week_1
         row["clients_week_2_sum"] = clients_week_2
@@ -288,6 +322,11 @@ def build_lifecycle_snapshot(
         row["betcount_week_3_sum"] = betcount_week_3
         row["betcount_week_1_to_2_growth"] = _safe_divide(betcount_week_2 - betcount_week_1, abs(betcount_week_1))
         row["betcount_week_2_to_3_growth"] = _safe_divide(betcount_week_3 - betcount_week_2, abs(betcount_week_2))
+        row["ggr_week_1_sum"] = ggr_week_1
+        row["ggr_week_2_sum"] = ggr_week_2
+        row["ggr_week_3_sum"] = ggr_week_3
+        row["ggr_week_1_to_2_growth"] = _safe_divide(ggr_week_2 - ggr_week_1, abs(ggr_week_1))
+        row["ggr_week_2_to_3_growth"] = _safe_divide(ggr_week_3 - ggr_week_2, abs(ggr_week_2))
         row["stake_per_client_week_1"] = _safe_divide(stakes_week_1, clients_week_1)
         row["stake_per_client_week_2"] = _safe_divide(stakes_week_2, clients_week_2)
         row["stake_per_client_week_3"] = _safe_divide(stakes_week_3, clients_week_3)
@@ -299,6 +338,10 @@ def build_lifecycle_snapshot(
         row["stake_per_bet_week_1"] = _safe_divide(stakes_week_1, betcount_week_1)
         row["stake_per_bet_week_2"] = _safe_divide(stakes_week_2, betcount_week_2)
         row["stake_per_bet_week_3"] = _safe_divide(stakes_week_3, betcount_week_3)
+        row["ggr_margin"] = _safe_divide(row["obs_ggr_sum"], row["obs_stakes_sum"])
+        row["ggr_margin_week_1"] = _safe_divide(ggr_week_1, stakes_week_1)
+        row["ggr_margin_week_2"] = _safe_divide(ggr_week_2, stakes_week_2)
+        row["ggr_margin_week_3"] = _safe_divide(ggr_week_3, stakes_week_3)
         row["stake_per_client_week_1_to_2_growth"] = _safe_divide(
             row["stake_per_client_week_2"] - row["stake_per_client_week_1"],
             abs(row["stake_per_client_week_1"]),
@@ -326,21 +369,35 @@ def build_lifecycle_snapshot(
         row["log_obs_clients_sum"] = _safe_log1p(row["obs_clients_sum"])
         row["log_obs_stakes_sum"] = _safe_log1p(row["obs_stakes_sum"])
         row["log_obs_betcount_sum"] = _safe_log1p(row.get("obs_betcount_sum"))
+        row["log_obs_ggr_sum"] = _safe_log1p(row.get("obs_ggr_sum"))
         row["log_clients_week_2_sum"] = _safe_log1p(clients_week_2)
         row["log_clients_week_3_sum"] = _safe_log1p(clients_week_3)
         row["log_stakes_week_2_sum"] = _safe_log1p(stakes_week_2)
         row["log_stakes_week_3_sum"] = _safe_log1p(stakes_week_3)
         row["log_betcount_week_2_sum"] = _safe_log1p(betcount_week_2)
         row["log_betcount_week_3_sum"] = _safe_log1p(betcount_week_3)
+        row["log_ggr_week_2_sum"] = _safe_log1p(ggr_week_2)
+        row["log_ggr_week_3_sum"] = _safe_log1p(ggr_week_3)
         row["Clients_Size_Band"] = _size_band(row["obs_clients_sum"], (100, 1_000, 10_000))
         row["Stakes_Size_Band"] = _size_band(row["obs_stakes_sum"], (10_000, 100_000, 1_000_000))
 
         if require_future:
             # Future rows are targets only; no future-derived column is used as a feature.
-            week_1 = game[game["Days_Since_First_Observed"].between(obs_window + 1, obs_window + 7)].copy()
-            week_2 = game[game["Days_Since_First_Observed"].between(obs_window + 8, obs_window + 14)].copy()
+            week_1 = game[game["Days_Since_First_Observed"].between(observation_end_age + 1, observation_end_age + 7)].copy()
+            week_2 = game[game["Days_Since_First_Observed"].between(observation_end_age + 8, observation_end_age + 14)].copy()
             row["target_clients"] = future["Clients"].sum(min_count=1)
             row["target_stakes"] = future["Stakes"].sum(min_count=1)
+            row["target_betcount"] = future["Betcount"].sum(min_count=1)
+            row["target_ggr"] = future["GGR"].sum(min_count=1)
+            row["target_bets_per_client"] = _safe_divide(
+                row["target_betcount"], row["target_clients"]
+            )
+            row["target_stake_per_bet"] = _safe_divide(
+                row["target_stakes"], row["target_betcount"]
+            )
+            row["target_ggr_margin"] = _safe_divide(
+                row["target_ggr"], row["target_stakes"]
+            )
             row["target_clients_week_1"] = week_1["Clients"].sum(min_count=1)
             row["target_clients_week_2"] = week_2["Clients"].sum(min_count=1)
             row["target_stakes_week_1"] = week_1["Stakes"].sum(min_count=1)
@@ -349,59 +406,6 @@ def build_lifecycle_snapshot(
         rows.append(row)
 
     return pd.DataFrame(rows).replace([np.inf, -np.inf], np.nan)
-
-
-def build_week4_snapshot(
-    data: pd.DataFrame,
-    obs_window: int = OBSERVATION_WINDOW_DAYS,
-    *,
-    require_future: bool = True,
-) -> pd.DataFrame:
-    """Build one row per game to forecast week 4 from a point-in-time window.
-
-    Day 14 uses weeks 1-2 as features. Day 21 uses weeks 1-3.
-    Week 4 is the prediction target when future data is required.
-    """
-    horizon = PREDICTION_WEEK_END - obs_window
-    snapshot = build_lifecycle_snapshot(
-        data,
-        obs_window,
-        horizon,
-        require_future=require_future,
-    )
-    if snapshot.empty:
-        return snapshot
-
-    snapshot["Lifecycle_Stage"] = f"Week {obs_window // 7}"
-    snapshot["Prediction_Week"] = 4
-
-    if require_future:
-        actuals = data[data["Game_ID"].isin(snapshot["Game_ID"])].copy()
-        actuals["week_number"] = ((actuals["Days_Since_First_Observed"] - 1) // 7 + 1).astype("int64")
-        weekly = (
-            actuals[actuals["week_number"].isin([3, 4])]
-            .groupby(["Game_ID", "week_number"], as_index=False)
-            .agg({"Clients": "sum", "Stakes": "sum"})
-        )
-        for metric, prefix in (("Clients", "clients"), ("Stakes", "stakes")):
-            wide = weekly.pivot(index="Game_ID", columns="week_number", values=metric)
-            snapshot[f"actual_{prefix}_week_3"] = snapshot["Game_ID"].map(wide.get(3))
-            snapshot[f"actual_{prefix}_week_4"] = snapshot["Game_ID"].map(wide.get(4))
-            snapshot[f"target_{prefix}"] = snapshot[f"actual_{prefix}_week_4"]
-
-    return snapshot.replace([np.inf, -np.inf], np.nan)
-
-
-def build_four_week_snapshot(
-    data: pd.DataFrame,
-    *,
-    require_future: bool = True,
-) -> pd.DataFrame:
-    return build_week4_snapshot(
-        data,
-        OBSERVATION_WINDOW_DAYS,
-        require_future=require_future,
-    )
 
 
 def prepare_features(frame: pd.DataFrame, categorical: list[str] | None = None) -> pd.DataFrame:

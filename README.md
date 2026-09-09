@@ -50,4 +50,14 @@ pnpm install
 pnpm dev
 ```
 
-Open `http://127.0.0.1:5173`, choose a CSV or Excel file (`.csv`, `.xls`, `.xlsx`, `.xlsb`, or `.xlsm`) and worksheet, then run the existing trained model. The selected sheet must include `Date`, `SystemName`, `TournamentName`, `Clients`, and `Stakes` columns. Each upload and generated report is kept under `data/uploads/` and `artifacts/uploads/`; the dashboard shows the latest successful run.
+Open `http://127.0.0.1:5173`, choose a CSV or Excel file (`.csv`, `.xls`, `.xlsx`, `.xlsb`, or `.xlsm`) and worksheet, then run the full production model. The selected sheet must include `Date`, `SystemName`, `TournamentName`, `Clients`, `Betcount`, `Stakes`, and `GGR` columns. The upload runs the same four notebook stages through the reusable `game_performance` modules: data cleaning, lifecycle feature engineering, full regression and classification training, then forecasting, reporting, and dashboard publishing. Each upload and generated report is kept under `data/uploads/` and `artifacts/uploads/`; the latest successful run also publishes the processed data, features, model artifact, and dashboard.
+
+Each run provides two downloads: `Business Report.xlsx` with concise holdout, high-performer, and forecasting sheets; and `Model Analysis.xlsx` with the complete model outputs.
+
+Uploaded data is split chronologically by unique launch date: 70% for training,
+15% for validation, and 15% for holdout scoring. For example, 60 dates produce
+42 training dates, 9 validation dates, and 9 holdout dates.
+
+After that evaluation, every forecast covers the next seven calendar days after
+the final observed date. `Prediction_Start` and `Prediction_End` show that
+window; forecasts are not labelled or calculated as lifecycle week-four values.

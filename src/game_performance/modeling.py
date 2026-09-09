@@ -24,12 +24,12 @@ from .validation import (
     regression_metrics,
     restrict_training_window,
     rolling_date_splits,
-    split_development_and_holdout,
+    split_training_validation_holdout,
 )
 
 TrainingMode = Literal["quick", "standard", "production"]
 
-NON_NEGATIVE_TARGETS = {"target_clients", "target_stakes"}
+NON_NEGATIVE_TARGETS = {"target_clients", "target_stakes", "target_betcount"}
 ProbabilityCalibrator = dict[str, Any]
 CLASSIFICATION_TARGETS = {
     "client": "is_high_client_performer",
@@ -324,6 +324,8 @@ def build_prediction_interval_table(
 def prediction_interval_from_table(
     predicted: Iterable[float],
     table: dict[str, float] | None,
+    *,
+    non_negative: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     prediction = np.asarray(predicted, dtype="float64")
     table = table or {}
@@ -351,7 +353,9 @@ def prediction_interval_from_table(
     high = prediction + upper_residual
     low = np.minimum(low, prediction)
     high = np.maximum(high, prediction)
-    return np.maximum(low, 0), np.maximum(high, 0)
+    if non_negative:
+        low, high = np.maximum(low, 0), np.maximum(high, 0)
+    return low, high
 
 
 def _absolute_percentage_error(actual: Iterable[float], predicted: Iterable[float]) -> pd.Series:
@@ -675,18 +679,21 @@ def confidence_from_prediction(
     )
 
 def _baseline_prediction(frame: pd.DataFrame, target: str) -> np.ndarray:
+    def constrain(values: np.ndarray) -> np.ndarray:
+        return np.maximum(values, 0) if target in NON_NEGATIVE_TARGETS else values
+
     short = target.replace("target_", "")
     recent_values = frame[f"{short}_last_7_mean"] if f"{short}_last_7_mean" in frame.columns else None
     recent_mean = pd.to_numeric(recent_values, errors="coerce") if recent_values is not None else None
     if recent_mean is not None and recent_mean.notna().any():
-        return np.maximum(recent_mean.fillna(0).to_numpy(dtype="float64") * 7, 0)
+        return constrain(recent_mean.fillna(0).to_numpy(dtype="float64") * 7)
 
     observed_values = frame[f"obs_{short}_sum"] if f"obs_{short}_sum" in frame.columns else None
     observed = pd.to_numeric(observed_values, errors="coerce") if observed_values is not None else None
     window_values = frame["Obs_Window"] if "Obs_Window" in frame.columns else None
     window = pd.to_numeric(window_values, errors="coerce").replace(0, np.nan) if window_values is not None else None
     if observed is not None and window is not None and observed.notna().any():
-        return np.maximum((observed.fillna(0) / window * 7).fillna(0).to_numpy(dtype="float64"), 0)
+        return constrain((observed.fillna(0) / window * 7).fillna(0).to_numpy(dtype="float64"))
 
     week_3_column = f"{short}_week_3_sum"
     week_2_column = f"{short}_week_2_sum"
@@ -698,14 +705,14 @@ def _baseline_prediction(frame: pd.DataFrame, target: str) -> np.ndarray:
         growth = ((week_3 - week_2) / week_2.abs().replace(0, np.nan)).clip(lower=-0.5, upper=1.0).fillna(0)
         prediction = np.maximum((week_3.fillna(0) * (1 + growth)).to_numpy(dtype="float64"), 0)
         if has_week_3.any():
-            return prediction
+            return constrain(prediction)
     if week_2_column in frame.columns and week_1_column in frame.columns:
         week_1 = pd.to_numeric(frame[week_1_column], errors="coerce").fillna(0)
         week_2 = pd.to_numeric(frame[week_2_column], errors="coerce").fillna(0)
         growth = ((week_2 - week_1) / week_1.abs().replace(0, np.nan)).clip(lower=-0.5, upper=1.0).fillna(0)
-        return np.maximum((week_2 * (1 + growth)).to_numpy(dtype="float64"), 0)
+        return constrain((week_2 * (1 + growth)).to_numpy(dtype="float64"))
     if week_2_column in frame.columns:
-        return np.maximum(pd.to_numeric(frame[week_2_column], errors="coerce").fillna(0).to_numpy(), 0)
+        return constrain(pd.to_numeric(frame[week_2_column], errors="coerce").fillna(0).to_numpy())
     return np.zeros(len(frame), dtype="float64")
 
 
@@ -939,9 +946,10 @@ def tune_regressor(
     settings: Settings,
     mode: TrainingMode | None = None,
     training_window_days: int | None = None,
+    validation: pd.DataFrame | None = None,
 ) -> tuple[dict[str, Any], pd.DataFrame]:
     """
-    Tune a CatBoost regressor using rolling date validation.
+    Tune a CatBoost regressor using the supplied temporal validation split.
 
     Parameters
     ----------
@@ -961,18 +969,25 @@ def tune_regressor(
         Training mode: quick, standard, or production.
     training_window_days:
         Optional rolling training-window restriction.
+    validation:
+        Optional fixed validation data. When omitted, rolling date folds are
+        retained for callers that explicitly request backtesting.
     """
     records: list[dict[str, Any]] = []
     best_params: dict[str, Any] | None = None
     best_score = np.inf
 
-    # IMPORTANT:
-    # Pass training_window_days into the rolling validation splitter.
-    folds = _adaptive_rolling_date_splits(
-        development,
-        settings,
-        training_window_days,
-    )
+    if validation is None:
+        folds = _adaptive_rolling_date_splits(development, settings, training_window_days)
+    else:
+        training = restrict_training_window(
+            development,
+            training_window_days,
+            reference_date=pd.to_datetime(validation["First_Observed_Date"]).min(),
+        )
+        if len(training) < settings.min_training_rows or len(validation) < settings.min_validation_rows:
+            raise ValueError("The temporal training or validation split did not meet minimum row requirements.")
+        folds = [(training, validation)]
 
     for candidate_id, params in enumerate(
         _limit_candidates(
@@ -1078,6 +1093,7 @@ def tune_classifier(
     mode: TrainingMode | None = None,
     target_column: str = "is_high_performer",
     training_window_days: int | None = None,
+    validation: pd.DataFrame | None = None,
 ) -> tuple[dict[str, Any] | None, pd.DataFrame]:
     records: list[dict[str, Any]] = []
     best_params: dict[str, Any] | None = None
@@ -1086,7 +1102,17 @@ def tune_classifier(
     if development[target_column].nunique(dropna=True) < 2:
         return None, pd.DataFrame()
 
-    folds = _adaptive_rolling_date_splits(development, settings, training_window_days)
+    if validation is None:
+        folds = _adaptive_rolling_date_splits(development, settings, training_window_days)
+    else:
+        training = restrict_training_window(
+            development,
+            training_window_days,
+            reference_date=pd.to_datetime(validation["First_Observed_Date"]).min(),
+        )
+        if len(training) < settings.min_training_rows or len(validation) < settings.min_validation_rows:
+            raise ValueError("The temporal training or validation split did not meet minimum row requirements.")
+        folds = [(training, validation)]
 
     for candidate_id, params in enumerate(_limit_candidates(CLASSIFIER_PARAMETER_CANDIDATES, settings, mode), 1):
         aucs: list[float] = []
@@ -1152,9 +1178,18 @@ def tune_shared_hyperparameters(
     training_window_days: int | None = None,
 ) -> tuple[dict[str, Any], pd.DataFrame, int, int]:
     (checkpoint, horizon), snapshot = choose_representative_snapshot(snapshots, settings)
-    development, holdout, _ = split_development_and_holdout(snapshot, settings.final_test_fraction)
+    development, validation, _, _ = split_training_validation_holdout(
+        snapshot,
+        training_fraction=settings.training_fraction,
+        validation_fraction=settings.validation_fraction,
+        holdout_fraction=settings.final_test_fraction,
+    )
     if run_classification:
-        development, _, _ = create_high_performance_target(development, holdout, settings.high_performer_percentile)
+        development, validation, _ = create_high_performance_target(
+            development,
+            validation,
+            settings.high_performer_percentile,
+        )
     categorical = categorical_features(snapshot)
 
     selected_targets = list(targets or REGRESSION_TARGETS)
@@ -1172,6 +1207,7 @@ def tune_shared_hyperparameters(
                 settings,
                 mode,
                 training_window_days,
+                validation,
             )
             shared["regressors"][target] = params
             if not fold_results.empty:
@@ -1188,6 +1224,7 @@ def tune_shared_hyperparameters(
                 mode,
                 target_column,
                 training_window_days,
+                validation,
             )
             shared["classifiers"][goal] = params
             if not fold_results.empty:
@@ -1228,19 +1265,26 @@ def train_model_family(
     mode: TrainingMode | None = None,
     training_window_days: int | None = None,
 ) -> tuple[dict[str, Any], pd.DataFrame, list[dict[str, Any]], pd.DataFrame, pd.DataFrame]:
-    development, holdout, holdout_start = split_development_and_holdout(snapshot, settings.final_test_fraction)
+    development, validation, holdout, split_metadata = split_training_validation_holdout(
+        snapshot,
+        training_fraction=settings.training_fraction,
+        validation_fraction=settings.validation_fraction,
+        holdout_fraction=settings.final_test_fraction,
+    )
+    holdout_start = split_metadata["holdout_start"]
     development = restrict_training_window(
         development,
         training_window_days,
-        reference_date=holdout_start,
+        reference_date=split_metadata["validation_start"],
     )
     threshold = np.nan
     if run_classification:
-        development, holdout, threshold = create_high_performance_target(
+        development, validation, threshold = create_high_performance_target(
             development,
-            holdout,
+            validation,
             settings.high_performer_percentile,
         )
+        _, holdout, _ = create_high_performance_target(development, holdout, settings.high_performer_percentile)
     categorical = categorical_features(snapshot)
     selected_targets = list(targets or REGRESSION_TARGETS)
 
@@ -1255,7 +1299,7 @@ def train_model_family(
         "classifiers": {},
         "probability_calibrator": {"method": "identity", "model": None},
         "probability_calibrators": {},
-        "classification_threshold": float(_setting(settings, "classification_threshold", 0.5)),
+        "classification_threshold": float(_setting(settings, "classification_threshold", 0.80)),
         "classification_thresholds": {},
         "best_parameters": {},
         "confidence_scores": {},
@@ -1266,6 +1310,7 @@ def train_model_family(
         "tuned_on_horizon": tuning_horizon,
         "training_mode": _training_mode(settings, mode),
         "training_window_days": training_window_days,
+        "temporal_split": split_metadata,
     }
     evaluations: list[dict[str, Any]] = []
     predictions = _base_prediction_frame(holdout)
@@ -1277,34 +1322,40 @@ def train_model_family(
                 continue
 
             development_target = development.dropna(subset=[target]).copy()
+            validation_target = validation.dropna(subset=[target]).copy()
             holdout_target = holdout.dropna(subset=[target]).copy()
             if development_target.empty or holdout_target.empty:
                 continue
 
-            train, validation, _ = split_development_and_holdout(development_target, 0.15)
-            if train.empty:
-                continue
-            if validation.empty:
-                validation = None
+            validation_for_fit = validation_target if not validation_target.empty else None
 
             probe_model = _build_regressor(params, settings, mode)
             target_transform = _target_transform(params, target)
-            _fit_regressor(probe_model, train, validation, target, categorical, settings, mode, target_transform)
+            _fit_regressor(
+                probe_model,
+                development_target,
+                validation_for_fit,
+                target,
+                categorical,
+                settings,
+                mode,
+                target_transform,
+            )
             baseline = _baseline_prediction(holdout_target, target)
             baseline_metrics = regression_metrics(holdout_target[target], baseline)
             blend_weight = 1.0
 
-            if validation is not None and not validation.empty:
+            if validation_for_fit is not None:
                 validation_prediction = _prediction_from_fit(
                     target,
-                    probe_model.predict(prepare_features(validation, categorical)),
+                    probe_model.predict(prepare_features(validation_for_fit, categorical)),
                     target_transform,
                 )
-                validation_baseline = _baseline_prediction(validation, target)
-                blend_weight = _best_blend_weight(validation[target], validation_prediction, validation_baseline)
+                validation_baseline = _baseline_prediction(validation_for_fit, target)
+                blend_weight = _best_blend_weight(validation_for_fit[target], validation_prediction, validation_baseline)
                 validation_prediction = blend_weight * validation_prediction + (1 - blend_weight) * validation_baseline
-                confidence_table = build_confidence_table(validation[target], validation_prediction)
-                interval_table = build_prediction_interval_table(validation[target], validation_prediction)
+                confidence_table = build_confidence_table(validation_for_fit[target], validation_prediction)
+                interval_table = build_prediction_interval_table(validation_for_fit[target], validation_prediction)
             else:
                 confidence_table = {"fallback": np.nan, "bins": []}
                 interval_table = {"lower_residual": 0.0, "upper_residual": 0.0}
@@ -1321,7 +1372,9 @@ def train_model_family(
                 target_transform,
             )
             prediction = blend_weight * model_prediction + (1 - blend_weight) * baseline
-            prediction_low, prediction_high = prediction_interval_from_table(prediction, interval_table)
+            prediction_low, prediction_high = prediction_interval_from_table(
+                prediction, interval_table, non_negative=target in NON_NEGATIVE_TARGETS
+            )
             metrics = regression_metrics(holdout_target[target], prediction)
             actual_values = holdout_target[target].to_numpy(dtype="float64")
             valid_range = ~np.isnan(actual_values) & ~np.isnan(prediction_low) & ~np.isnan(prediction_high)
@@ -1378,17 +1431,7 @@ def train_model_family(
             predictions.loc[holdout_target.index, f"predicted_{short_name}_low"] = prediction_low
             predictions.loc[holdout_target.index, f"predicted_{short_name}"] = prediction
             predictions.loc[holdout_target.index, f"predicted_{short_name}_high"] = prediction_high
-            predictions.loc[holdout_target.index, f"baseline_{short_name}_week_4"] = baseline
-            predictions.loc[holdout_target.index, f"predicted_{short_name}_week_4_low"] = prediction_low
-            predictions.loc[holdout_target.index, f"predicted_{short_name}_week_4"] = prediction
-            predictions.loc[holdout_target.index, f"predicted_{short_name}_week_4_high"] = prediction_high
             predictions.loc[holdout_target.index, f"confidence_{short_name}"] = confidence
-            week_3_column = f"actual_{short_name}_week_3"
-            week_4_column = f"actual_{short_name}_week_4"
-            if week_3_column in holdout_target.columns:
-                predictions.loc[holdout_target.index, week_3_column] = holdout_target[week_3_column]
-            if week_4_column in holdout_target.columns:
-                predictions.loc[holdout_target.index, week_4_column] = holdout_target[week_4_column]
             for week in (1, 2):
                 week_column = f"{target}_week_{week}"
                 if week_column in holdout_target.columns:
@@ -1399,8 +1442,7 @@ def train_model_family(
     class_eval: list[dict[str, Any]] = []
     calibration_frames: list[pd.DataFrame] = []
     if run_classification:
-        train, validation, _ = split_development_and_holdout(development, 0.15)
-        default_threshold = float(_setting(settings, "classification_threshold", 0.5))
+        default_threshold = float(_setting(settings, "classification_threshold", 0.80))
         n_bins = int(_setting(settings, "calibration_bins", 10))
 
         for goal, target_column in CLASSIFICATION_TARGETS.items():
@@ -1409,9 +1451,9 @@ def train_model_family(
                 continue
 
             probe_classifier = _build_classifier(params, settings, mode)
-            if train[target_column].nunique() >= 2:
+            if development[target_column].nunique() >= 2:
                 validation_for_fit = validation if validation[target_column].nunique() >= 2 else None
-                _fit_classifier(probe_classifier, train, validation_for_fit, categorical, settings, mode, target_column)
+                _fit_classifier(probe_classifier, development, validation_for_fit, categorical, settings, mode, target_column)
             else:
                 _fit_classifier(probe_classifier, development, None, categorical, settings, mode, target_column)
 
@@ -1431,6 +1473,7 @@ def train_model_family(
                     validation_probability,
                     default=default_threshold,
                 )
+                classification_threshold = max(default_threshold, classification_threshold)
                 validation_predicted = (validation_probability >= classification_threshold).astype(int)
                 validation_eval = {
                     f"Validation_{key}": value
@@ -1520,7 +1563,7 @@ def select_best_configuration(
     targets: Iterable[str] | None = None,
     mode: TrainingMode | None = None,
 ) -> tuple[dict[str, Any], pd.DataFrame]:
-    """Select checkpoint and training window using rolling development WAPE only."""
+    """Select checkpoint and training window using the fixed temporal validation split."""
     selected_targets = list(targets or REGRESSION_TARGETS)
     records: list[dict[str, Any]] = []
     selection_mode = mode or _setting(settings, "selection_mode", "quick")
@@ -1529,7 +1572,12 @@ def select_best_configuration(
         minimum = settings.min_training_rows + settings.min_validation_rows
         if len(snapshot) < minimum:
             continue
-        development, _, _ = split_development_and_holdout(snapshot, settings.final_test_fraction)
+        development, validation, _, _ = split_training_validation_holdout(
+            snapshot,
+            training_fraction=settings.training_fraction,
+            validation_fraction=settings.validation_fraction,
+            holdout_fraction=settings.final_test_fraction,
+        )
         categorical = categorical_features(snapshot)
 
         for training_window_days in settings.training_window_days:
@@ -1546,6 +1594,7 @@ def select_best_configuration(
                         settings,
                         selection_mode,
                         training_window_days,
+                        validation,
                     )
                 except ValueError:
                     continue

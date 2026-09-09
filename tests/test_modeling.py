@@ -23,7 +23,20 @@ def test_select_best_configuration_uses_development_wape(monkeypatch):
         "target_stakes": 1.0,
     })
 
-    def fake_tune(development, target, checkpoint, horizon, categorical, settings, mode=None, training_window_days=None):
+    validation_sets = []
+
+    def fake_tune(
+        development,
+        target,
+        checkpoint,
+        horizon,
+        categorical,
+        settings,
+        mode=None,
+        training_window_days=None,
+        validation=None,
+    ):
+        validation_sets.append(validation)
         score = 0.20 if (checkpoint, training_window_days) == (35, 60) else 0.80
         return {"_target_transform": "raw"}, pd.DataFrame({"Candidate": [1, 1], "WAPE": [score, score]})
 
@@ -42,6 +55,7 @@ def test_select_best_configuration_uses_development_wape(monkeypatch):
 
     assert (best["Checkpoint"], best["Training_Window_Days"]) == (35, 60)
     assert leaderboard.iloc[0]["Mean_WAPE"] == 0.20
+    assert all(validation is not None for validation in validation_sets)
 
 
 def test_confidence_table_calibrates_prediction_ranges():
@@ -74,6 +88,18 @@ def test_target_transforms_round_trip_business_scale_values():
 
     assert np.allclose(restored, values)
     assert np.all(restored >= 0)
+
+
+def test_ggr_predictions_and_intervals_preserve_negative_values():
+    values = np.array([-10.0, 0.0, 10.0])
+
+    assert np.allclose(modeling.transform_regression_target("target_ggr", values), values)
+    low, high = modeling.prediction_interval_from_table(
+        [-5.0], {"lower_residual": -3.0, "upper_residual": 2.0}, non_negative=False
+    )
+
+    assert low.tolist() == [-8.0]
+    assert high.tolist() == [-3.0]
 
 
 def test_select_classification_threshold_uses_best_validation_f1():

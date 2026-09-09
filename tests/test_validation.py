@@ -1,6 +1,11 @@
 import pandas as pd
 
-from game_performance.validation import create_high_performance_target, restrict_training_window, rolling_date_splits
+from game_performance.validation import (
+    create_high_performance_target,
+    restrict_training_window,
+    rolling_date_splits,
+    split_training_validation_holdout,
+)
 
 
 def _frame(client_values, stake_values=None):
@@ -32,6 +37,17 @@ def test_training_window_keeps_only_recent_launch_dates():
     result = restrict_training_window(frame, 3, reference_date=pd.Timestamp("2026-01-05"))
 
     assert result["First_Observed_Date"].tolist() == list(pd.date_range("2026-01-03", periods=3))
+
+
+def test_temporal_split_uses_70_15_15_of_unique_days_in_order():
+    frame = pd.DataFrame({"First_Observed_Date": pd.date_range("2026-01-01", periods=60).repeat(2)})
+
+    training, validation, holdout, metadata = split_training_validation_holdout(frame)
+
+    assert [part["First_Observed_Date"].nunique() for part in (training, validation, holdout)] == [42, 9, 9]
+    assert training["First_Observed_Date"].max() < validation["First_Observed_Date"].min()
+    assert validation["First_Observed_Date"].max() < holdout["First_Observed_Date"].min()
+    assert metadata["total_days"] == 60
 
 
 def test_rolling_date_splits_apply_training_window_before_validation():

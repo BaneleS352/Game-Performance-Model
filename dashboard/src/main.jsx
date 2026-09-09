@@ -26,6 +26,7 @@ const money = new Intl.NumberFormat("en-ZA", {
 });
 const whole = new Intl.NumberFormat("en-ZA", { maximumFractionDigits: 0 });
 const pct = new Intl.NumberFormat("en-ZA", { style: "percent", maximumFractionDigits: 0 });
+const requiredUploadHeaders = ["Date", "SystemName", "TournamentName", "Clients", "Betcount", "Stakes", "GGR"];
 const ledgerRowHeight = 44;
 const ledgerOverscan = 10;
 const ledgerWindowSize = 34;
@@ -35,20 +36,20 @@ const baseLedgerColumns = [
   { key: "Horizon", label: "Horizon", type: "number", width: "90px" },
 ];
 const clientRangeColumn = {
-  key: "predicted_clients_week_4_range",
-  label: "Prediction Clients Week 4 Range",
+  key: "predicted_clients_range",
+  label: "Next 7 Days Clients Range",
   type: "number",
   width: "260px",
-  sortKey: "predicted_clients_week_4",
-  render: (row) => `${formatValue(row.predicted_clients_week_4_low, "number")} - ${formatValue(row.predicted_clients_week_4_high, "number")}`,
+  sortKey: "predicted_clients",
+  render: (row) => `${formatValue(row.predicted_clients_low, "number")} - ${formatValue(row.predicted_clients_high, "number")}`,
 };
 const stakesRangeColumn = {
-  key: "predicted_stakes_week_4_range",
-  label: "Prediction Stakes Week 4 Range",
+  key: "predicted_stakes_range",
+  label: "Next 7 Days Stakes Range",
   type: "money",
   width: "300px",
-  sortKey: "predicted_stakes_week_4",
-  render: (row) => `${formatValue(row.predicted_stakes_week_4_low, "money")} - ${formatValue(row.predicted_stakes_week_4_high, "money")}`,
+  sortKey: "predicted_stakes",
+  render: (row) => `${formatValue(row.predicted_stakes_low, "money")} - ${formatValue(row.predicted_stakes_high, "money")}`,
 };
 const confidenceClientsColumn = { key: "confidence_clients", label: "Confidence Clients", type: "percent", width: "150px" };
 const confidenceStakesColumn = { key: "confidence_stakes", label: "Confidence Stakes", type: "percent", width: "150px" };
@@ -78,13 +79,13 @@ const ledgerModes = {
   },
   top_stakes: {
     label: "Top Stakes",
-    sortKey: "predicted_stakes_week_4",
+    sortKey: "predicted_stakes",
     direction: "desc",
     columns: stakesLedgerColumns,
   },
   top_clients: {
     label: "Top Clients",
-    sortKey: "predicted_clients_week_4",
+    sortKey: "predicted_clients",
     direction: "desc",
     columns: clientLedgerColumns,
   },
@@ -111,8 +112,8 @@ function formatValue(value, type) {
 }
 
 function tieBreakSort(sortKey) {
-  if (sortKey === "confidence_clients") return "predicted_clients_week_4";
-  return "predicted_stakes_week_4";
+  if (sortKey === "confidence_clients") return "predicted_clients";
+  return "predicted_stakes";
 }
 
 function compareValues(a, b, column) {
@@ -129,7 +130,7 @@ function sheetLabel(name) {
 }
 
 function combinedPerformanceScore(row, maxClients, maxStakes) {
-  return (number(row.predicted_clients_week_4) / maxClients) + (number(row.predicted_stakes_week_4) / maxStakes);
+  return (number(row.predicted_clients) / maxClients) + (number(row.predicted_stakes) / maxStakes);
 }
 
 function Dashboard() {
@@ -202,8 +203,8 @@ function DashboardView({ data, onDashboardData }) {
       });
 
     if (sort === "combined_performance") {
-      const maxClients = Math.max(...filteredRows.map((row) => number(row.predicted_clients_week_4)), 1);
-      const maxStakes = Math.max(...filteredRows.map((row) => number(row.predicted_stakes_week_4)), 1);
+      const maxClients = Math.max(...filteredRows.map((row) => number(row.predicted_clients)), 1);
+      const maxStakes = Math.max(...filteredRows.map((row) => number(row.predicted_stakes)), 1);
       const direction = activeMode.direction === "asc" ? 1 : -1;
       return filteredRows.sort((a, b) => (
         direction * (combinedPerformanceScore(a, maxClients, maxStakes) - combinedPerformanceScore(b, maxClients, maxStakes))
@@ -216,19 +217,19 @@ function DashboardView({ data, onDashboardData }) {
 
   const topSystems = useMemo(
     () => [...(data.systems ?? [])]
-      .sort((a, b) => number(b.predicted_stakes_week_4) - number(a.predicted_stakes_week_4))
+      .sort((a, b) => number(b.predicted_stakes) - number(a.predicted_stakes))
       .slice(0, 6),
     [data.systems],
   );
   const topClientSystems = useMemo(
     () => [...(data.systems ?? [])]
-      .sort((a, b) => number(b.predicted_clients_week_4) - number(a.predicted_clients_week_4))
+      .sort((a, b) => number(b.predicted_clients) - number(a.predicted_clients))
       .slice(0, 6),
     [data.systems],
   );
   const topGames = useMemo(
     () => [...(data.top_stakes ?? data.forecasts ?? [])]
-      .sort((a, b) => number(b.predicted_stakes_week_4) - number(a.predicted_stakes_week_4))
+      .sort((a, b) => number(b.predicted_stakes) - number(a.predicted_stakes))
       .slice(0, 20),
     [data.top_stakes, data.forecasts],
   );
@@ -253,13 +254,13 @@ function DashboardView({ data, onDashboardData }) {
   const ledgerRows = rows.slice(ledgerStart, ledgerEnd);
   const ledgerTopPad = ledgerStart * ledgerRowHeight;
   const ledgerBottomPad = Math.max(0, (rows.length - ledgerEnd) * ledgerRowHeight);
-  const totalSystemStakes = topSystems.reduce((sum, row) => sum + number(row.predicted_stakes_week_4), 0) || 1;
-  const totalSystemClients = topClientSystems.reduce((sum, row) => sum + number(row.predicted_clients_week_4), 0) || 1;
+  const totalSystemStakes = topSystems.reduce((sum, row) => sum + number(row.predicted_stakes), 0) || 1;
+  const totalSystemClients = topClientSystems.reduce((sum, row) => sum + number(row.predicted_clients), 0) || 1;
   const healthScore = Math.round((1 - number(summary.holdout_off_by_20_rate)) * 100);
   const xp = Math.round(number(summary.avg_probability_clients) * 420);
   const levelProgress = Math.min(100, Math.max(0, (xp / 420) * 100));
-  const donutBackground = makeDonut(topSystems, totalSystemStakes, "predicted_stakes_week_4");
-  const clientDonutBackground = makeDonut(topClientSystems, totalSystemClients, "predicted_clients_week_4");
+  const donutBackground = makeDonut(topSystems, totalSystemStakes, "predicted_stakes");
+  const clientDonutBackground = makeDonut(topClientSystems, totalSystemClients, "predicted_clients");
 
   function openSheet(name) {
     setActiveSheetName(name);
@@ -303,8 +304,8 @@ function DashboardView({ data, onDashboardData }) {
           </div>
 
           <section className="stat-grid" aria-label="Forecast summary">
-            <Kpi icon={<CashIcon />} label="Week 4 Stakes" value={money.format(number(summary.total_predicted_stakes_week_4))} tone="green" />
-            <Kpi icon={<UsersIcon />} label="Week 4 Clients" value={whole.format(number(summary.total_predicted_clients_week_4))} tone="pink" />
+            <Kpi icon={<CashIcon />} label="Next 7 Days Stakes" value={money.format(number(summary.total_predicted_stakes))} tone="green" />
+            <Kpi icon={<UsersIcon />} label="Next 7 Days Clients" value={whole.format(number(summary.total_predicted_clients))} tone="pink" />
             <Kpi icon={<ScaleIcon />} label="Client Probability" value={pct.format(number(summary.avg_probability_clients))} tone="mint" />
             <Kpi icon={<PiggyIcon />} label="Stake Probability" value={pct.format(number(summary.avg_probability_stakes))} tone="blue" />
             <Kpi icon={<FlexIcon />} label="Health Score" value={whole.format(healthScore)} tone="lime" />
@@ -339,7 +340,7 @@ function DashboardView({ data, onDashboardData }) {
           <section className="top-games">
             <div className="top-games-heading">
               <h3><MedalIcon /> Top 20 Games</h3>
-              <span>Ranked by predicted Week 4 stakes</span>
+              <span>Ranked by next 7 days stakes</span>
             </div>
             <div className="table-wrap">
               <table>
@@ -359,8 +360,8 @@ function DashboardView({ data, onDashboardData }) {
                       <td className="rank">#{index + 1}</td>
                       <td>{row.TournamentName || row.Game_ID || "-"}</td>
                       <td>{row.SystemName || "-"}</td>
-                      <td className="num">{money.format(number(row.predicted_stakes_week_4))}</td>
-                      <td className="num">{whole.format(number(row.predicted_clients_week_4))}</td>
+                      <td className="num">{money.format(number(row.predicted_stakes))}</td>
+                      <td className="num">{whole.format(number(row.predicted_clients))}</td>
                       <td className="num">{pct.format(number(row.confidence_stakes))}</td>
                     </tr>
                   ))}
@@ -457,7 +458,7 @@ function UploadPanel({ onDashboardData }) {
   const [sheetName, setSheetName] = useState("");
   const [status, setStatus] = useState("idle");
   const [message, setMessage] = useState("");
-  const [reportUrl, setReportUrl] = useState("");
+  const [reportUrls, setReportUrls] = useState(null);
 
   async function chooseWorkbook(event) {
     const file = event.target.files?.[0];
@@ -466,7 +467,7 @@ function UploadPanel({ onDashboardData }) {
     setSheets([]);
     setSheetName("");
     setMessage("");
-    setReportUrl("");
+    setReportUrls(null);
     setStatus("uploading");
     try {
       const payload = await readJson(await fetch("/api/uploads", {
@@ -488,8 +489,8 @@ function UploadPanel({ onDashboardData }) {
   async function runModel() {
     if (!upload || !sheetName) return;
     setStatus("running");
-    setMessage("Scoring the selected worksheet and refreshing the dashboard...");
-    setReportUrl("");
+    setMessage("Running the complete production model. This may take several minutes...");
+    setReportUrls(null);
     try {
       const result = await readJson(await fetch(`/api/uploads/${upload.id}/run`, {
         method: "POST",
@@ -500,7 +501,7 @@ function UploadPanel({ onDashboardData }) {
       onDashboardData(dashboardData);
       setStatus("success");
       setMessage(`${whole.format(result.summary.games_scored)} games scored from ${upload.name}.`);
-      setReportUrl(result.report_url);
+      setReportUrls({ business: result.business_report_url, analysis: result.model_analysis_url });
     } catch (error) {
       setStatus("error");
       setMessage(error.message);
@@ -514,30 +515,46 @@ function UploadPanel({ onDashboardData }) {
         <span className="badge-icon"><SheetIcon /></span>
         <div>
           <h2 id="upload-heading">New workbook</h2>
-          <p>Use the trained model to score an uploaded worksheet.</p>
+          <p>Run the uploaded worksheet through the complete production model.</p>
         </div>
       </div>
-      <div className="upload-controls">
-        <label className="file-input">
-          <span>Spreadsheet</span>
-          <input type="file" accept=".csv,.xls,.xlsx,.xlsb,.xlsm,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12" onChange={chooseWorkbook} disabled={busy} />
-        </label>
-        <label>
-          <span>Worksheet</span>
-          <select value={sheetName} onChange={(event) => setSheetName(event.target.value)} disabled={!upload || busy}>
-            <option value="">Choose a worksheet</option>
-            {sheets.map((sheet) => <option key={sheet} value={sheet}>{sheet}</option>)}
-          </select>
-        </label>
-        <button className="run-button" type="button" onClick={runModel} disabled={!upload || !sheetName || busy}>
-          <ChartIcon /> {status === "running" ? "Scoring..." : "Run model"}
-        </button>
+      <div className="upload-workflow">
+        <div className="upload-requirements" aria-label="Required upload headers">
+          <strong>Required headers</strong>
+          <span>{requiredUploadHeaders.join(", ")}</span>
+        </div>
+        <div className="upload-controls">
+          <label className="file-input">
+            <span>Spreadsheet</span>
+            <input type="file" accept=".csv,.xls,.xlsx,.xlsb,.xlsm,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12" onChange={chooseWorkbook} disabled={busy} />
+          </label>
+          <label>
+            <span>Worksheet</span>
+            <select value={sheetName} onChange={(event) => setSheetName(event.target.value)} disabled={!upload || busy}>
+              <option value="">Choose a worksheet</option>
+              {sheets.map((sheet) => <option key={sheet} value={sheet}>{sheet}</option>)}
+            </select>
+          </label>
+          <button className="run-button" type="button" onClick={runModel} disabled={!upload || !sheetName || busy}>
+            <ChartIcon /> {status === "running" ? "Running production..." : "Run production model"}
+          </button>
+        </div>
+        {status === "running" && (
+          <div className="upload-progress" role="progressbar" aria-label="Production model progress" aria-valuetext="The full production model is running">
+            <span />
+          </div>
+        )}
+        {message && (
+          <p className={`upload-status ${status}`} role={status === "error" ? "alert" : "status"} aria-live="polite">
+            {message} {reportUrls && (
+              <span className="report-downloads">
+                <a href={reportUrls.business}>Download Business Report</a>
+                <a href={reportUrls.analysis}>Download Model Analysis</a>
+              </span>
+            )}
+          </p>
+        )}
       </div>
-      {message && (
-        <p className={`upload-status ${status}`} role={status === "error" ? "alert" : "status"} aria-live="polite">
-          {message} {reportUrl && <a href={reportUrl}>Download report</a>}
-        </p>
-      )}
     </section>
   );
 }
@@ -573,7 +590,7 @@ function UploadPage({ onDashboardData }) {
         <span className="badge-icon"><SheetIcon /></span>
         <div>
           <h2>New Workbook</h2>
-          <p>Upload a workbook, choose a worksheet, and score it with the trained model.</p>
+          <p>Upload a workbook, choose a worksheet, and run the complete production model.</p>
         </div>
       </div>
       <UploadPanel onDashboardData={onDashboardData} />

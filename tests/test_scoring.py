@@ -15,6 +15,11 @@ class BandedRegressor:
         return np.array([10.0, 24.0])
 
 
+class NegativeRegressor:
+    def predict(self, frame):
+        return np.array([-5.0] * len(frame))
+
+
 class DummyClassifier:
     def predict_proba(self, frame):
         return np.tile(np.array([[0.70, 0.30]]), (len(frame), 1))
@@ -62,15 +67,14 @@ def test_score_snapshot_uses_calibrated_probability_and_bundle_threshold():
 
     scored = score_snapshot(snapshot, bundle)
 
-    assert np.isclose(scored.loc[0, "predicted_clients_week_4"], 24.0)
     assert np.isclose(scored.loc[0, "predicted_clients"], 24.0)
-    assert np.isclose(scored.loc[0, "predicted_clients_week_4_low"], 20.0)
-    assert np.isclose(scored.loc[0, "predicted_clients_week_4_high"], 30.0)
+    assert np.isclose(scored.loc[0, "predicted_clients_low"], 20.0)
+    assert np.isclose(scored.loc[0, "predicted_clients_high"], 30.0)
     assert np.isclose(scored.loc[0, "confidence_clients"], 0.64)
     assert np.isclose(scored.loc[0, "raw_probability_high_performance"], 0.30)
     assert np.isclose(scored.loc[0, "probability_high_performance"], 0.70)
-    assert np.isclose(scored.loc[0, "classification_threshold"], 0.65)
-    assert scored.loc[0, "predicted_high_performer"] == 1
+    assert np.isclose(scored.loc[0, "classification_threshold"], 0.80)
+    assert scored.loc[0, "predicted_high_performer"] == 0
 
 
 def test_score_snapshot_emits_separate_client_and_stakes_goal_probabilities():
@@ -104,9 +108,30 @@ def test_score_snapshot_emits_separate_client_and_stakes_goal_probabilities():
     assert np.isclose(scored.loc[0, "probability_high_client_performer"], 0.80)
     assert np.isclose(scored.loc[0, "probability_high_stakes_performer"], 0.40)
     assert np.isclose(scored.loc[0, "probability_high_performance"], 0.40)
+    assert np.isclose(scored.loc[0, "classification_threshold_high_client_performer"], 0.80)
     assert scored.loc[0, "predicted_high_client_performer"] == 1
     assert scored.loc[0, "predicted_high_stakes_performer"] == 0
     assert scored.loc[0, "predicted_high_performer"] == 0
+
+
+def test_score_snapshot_forecasts_betcount_and_signed_ggr():
+    snapshot = pd.DataFrame({"Game_ID": ["SYS::Game"], "Obs_Window": [7], "Horizon": [7]})
+    bundle = {
+        "categorical_features": [],
+        "regressors": {"target_betcount": DummyRegressor(), "target_ggr": NegativeRegressor()},
+        "target_transforms": {"target_betcount": "log", "target_ggr": "raw"},
+        "blend_weights": {"target_betcount": 1.0, "target_ggr": 1.0},
+        "prediction_interval_tables": {
+            "target_betcount": {"lower_residual": -4, "upper_residual": 6},
+            "target_ggr": {"lower_residual": -3, "upper_residual": 2},
+        },
+    }
+
+    scored = score_snapshot(snapshot, bundle)
+
+    assert scored.loc[0, "predicted_betcount"] == 24
+    assert scored.loc[0, "predicted_ggr"] == -5
+    assert scored.loc[0, "predicted_ggr_low"] == -8
 
 
 def test_score_snapshot_uses_prediction_bands_for_game_confidence():
@@ -151,7 +176,9 @@ def test_daily_scoring_emits_all_eligible_checkpoint_families():
         "SystemName": ["SYS"] * 28,
         "TournamentName": ["Game"] * 28,
         "Clients": [10] * 28,
+        "Betcount": [20] * 28,
         "Stakes": [100] * 28,
+        "GGR": [10] * 28,
     })
     data = clean_game_daily(raw)
     bundle = {
@@ -170,4 +197,6 @@ def test_daily_scoring_emits_all_eligible_checkpoint_families():
     )
 
     assert set(predictions["Checkpoint"]) == {14, 21}
-    assert {"predicted_clients_week_4_low", "predicted_clients_week_4_high"}.issubset(predictions.columns)
+    assert {"predicted_clients_low", "predicted_clients_high"}.issubset(predictions.columns)
+    assert set(predictions["Prediction_Start"]) == {pd.Timestamp("2026-01-29")}
+    assert set(predictions["Prediction_End"]) == {pd.Timestamp("2026-02-04")}

@@ -11,7 +11,9 @@ REQUIRED_COLUMNS = {
     "SystemName",
     "TournamentName",
     "Clients",
+    "Betcount",
     "Stakes",
+    "GGR",
 }
 
 

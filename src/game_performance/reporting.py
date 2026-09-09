@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .features import OBSERVATION_WINDOW_DAYS, PREDICTION_WEEK_END
+from .features import FORECAST_HORIZON_DAYS, OBSERVATION_WINDOW_DAYS
 from .validation import create_high_performance_target, split_development_and_holdout
 
 
@@ -13,7 +13,7 @@ def _period_columns(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy()
     first = pd.to_datetime(result["First_Observed_Date"], errors="coerce")
     checkpoint = pd.to_numeric(result.get("Obs_Window", OBSERVATION_WINDOW_DAYS), errors="coerce")
-    horizon = pd.to_numeric(result.get("Horizon", PREDICTION_WEEK_END - OBSERVATION_WINDOW_DAYS), errors="coerce")
+    horizon = pd.to_numeric(result.get("Horizon", FORECAST_HORIZON_DAYS), errors="coerce")
     result["Observation_Start"] = first
     result["Observation_End"] = first + pd.to_timedelta(checkpoint - 1, unit="D")
     result["Prediction_Start"] = first + pd.to_timedelta(checkpoint, unit="D")
@@ -69,11 +69,6 @@ def _prediction_probability(actual: pd.Series, predicted: pd.Series) -> pd.Serie
     )
 
     return probability
-
-
-def _growth_percentage(week_1: pd.Series, week_2: pd.Series) -> pd.Series:
-    denominator = week_1.abs().replace(0, np.nan)
-    return ((week_2 - week_1) / denominator).mask(denominator.isna())
 
 
 def _is_off_by(actual: pd.Series, predicted: pd.Series, threshold: float) -> pd.Series:
@@ -141,19 +136,16 @@ def build_holdout_comparison(
 
     test = _period_columns(test)
 
-    metrics = [
-        "clients",
-        "stakes",
-    ]
+    metrics = ["clients", "stakes", "betcount", "ggr"]
 
     # ------------------------------------------------------------------
     # Error calculations
     # ------------------------------------------------------------------
     for metric in metrics:
-        actual = f"actual_{metric}" if f"actual_{metric}" in test.columns else f"actual_{metric}_week_4"
-        predicted = f"predicted_{metric}" if f"predicted_{metric}" in test.columns else f"predicted_{metric}_week_4"
-        low = f"predicted_{metric}_low" if f"predicted_{metric}_low" in test.columns else f"predicted_{metric}_week_4_low"
-        high = f"predicted_{metric}_high" if f"predicted_{metric}_high" in test.columns else f"predicted_{metric}_week_4_high"
+        actual = f"actual_{metric}"
+        predicted = f"predicted_{metric}"
+        low = f"predicted_{metric}_low"
+        high = f"predicted_{metric}_high"
 
         if {actual, predicted}.issubset(test.columns):
             variance = test[predicted] - test[actual]
@@ -166,16 +158,12 @@ def build_holdout_comparison(
                     test[low], test[high], inclusive="both"
                 ).where(range_valid).astype("Int8")
                 test[f"{metric}_range_width"] = test[high] - test[low]
-            week_3 = f"actual_{metric}_week_3"
-            week_4 = f"actual_{metric}_week_4"
-            if {week_3, week_4}.issubset(test.columns):
-                test[f"week_3_to_week_4_{metric}_growth_pct"] = _growth_percentage(test[week_3], test[week_4])
 
     off_10 = []
     off_20 = []
     for metric in metrics:
-        actual = f"actual_{metric}" if f"actual_{metric}" in test.columns else f"actual_{metric}_week_4"
-        predicted = f"predicted_{metric}" if f"predicted_{metric}" in test.columns else f"predicted_{metric}_week_4"
+        actual = f"actual_{metric}"
+        predicted = f"predicted_{metric}"
         if {actual, predicted}.issubset(test.columns):
             off_10.append(_is_off_by(test[actual], test[predicted], 0.10))
             off_20.append(_is_off_by(test[actual], test[predicted], 0.20))
@@ -221,15 +209,8 @@ def build_holdout_comparison(
     for metric in metrics:
         ordered_columns.extend(
             [
-                f"actual_{metric}_week_3",
-                f"actual_{metric}_week_4",
-                f"week_3_to_week_4_{metric}_growth_pct",
                 f"actual_{metric}",
-                f"baseline_{metric}_week_4",
                 f"baseline_{metric}",
-                f"predicted_{metric}_week_4_low",
-                f"predicted_{metric}_week_4",
-                f"predicted_{metric}_week_4_high",
                 f"predicted_{metric}_low",
                 f"predicted_{metric}",
                 f"predicted_{metric}_high",
@@ -312,7 +293,7 @@ def build_training_view(
     snapshot: pd.DataFrame,
     *,
     checkpoint=OBSERVATION_WINDOW_DAYS,
-    horizon=PREDICTION_WEEK_END - OBSERVATION_WINDOW_DAYS,
+    horizon=FORECAST_HORIZON_DAYS,
     test_fraction=0.15,
     percentile=0.80,
 ):
@@ -353,6 +334,36 @@ def _high_performers(comparison: pd.DataFrame) -> pd.DataFrame:
     return comparison[comparison["predicted_high_performer"] == 1].copy()
 
 
+BUSINESS_REPORT_EXCLUDED_COLUMNS = {
+    "TournamentName",
+    "SystemName",
+    "First_Observed_Date",
+    "Observation_Start",
+    "Observation_End",
+    "Prediction_Start",
+    "Prediction_End",
+    "future_performance_score",
+    "is_high_client_performer",
+    "is_high_stakes_performer",
+    "is_balanced_high_performer",
+    "raw_probability_high_client_performer",
+    "probability_high_client_performer",
+    "classification_threshold_high_client_performer",
+    "predicted_high_client_performer",
+    "raw_probability_high_stakes_performer",
+    "probability_high_stakes_performer",
+    "classification_threshold_high_stakes_performer",
+    "predicted_high_stakes_performer",
+    "raw_probability_high_performance",
+    "probability_high_performance",
+    "classification_threshold",
+}
+
+
+def _business_report_view(frame: pd.DataFrame) -> pd.DataFrame:
+    return frame.drop(columns=BUSINESS_REPORT_EXCLUDED_COLUMNS.intersection(frame.columns)).copy()
+
+
 def _forecast_export_columns(forecasts: pd.DataFrame) -> pd.DataFrame:
     allowed = [
         "Game_ID",
@@ -360,6 +371,8 @@ def _forecast_export_columns(forecasts: pd.DataFrame) -> pd.DataFrame:
         "SystemName",
         "First_Observed_Date",
         "Lifecycle_Stage",
+        "Prediction_Start",
+        "Prediction_End",
         "Obs_Window",
         "Horizon",
         "active_observation_days",
@@ -369,18 +382,24 @@ def _forecast_export_columns(forecasts: pd.DataFrame) -> pd.DataFrame:
         "predicted_clients_low",
         "predicted_clients",
         "predicted_clients_high",
-        "predicted_clients_week_4_low",
-        "predicted_clients_week_4",
-        "predicted_clients_week_4_high",
         "confidence_clients",
+        "actual_betcount",
+        "baseline_betcount",
+        "predicted_betcount_low",
+        "predicted_betcount",
+        "predicted_betcount_high",
+        "confidence_betcount",
+        "actual_ggr",
+        "baseline_ggr",
+        "predicted_ggr_low",
+        "predicted_ggr",
+        "predicted_ggr_high",
+        "confidence_ggr",
         "actual_stakes",
         "baseline_stakes",
         "predicted_stakes_low",
         "predicted_stakes",
         "predicted_stakes_high",
-        "predicted_stakes_week_4_low",
-        "predicted_stakes_week_4",
-        "predicted_stakes_week_4_high",
         "confidence_stakes",
         "probability_high_client_performer",
         "predicted_high_client_performer",
@@ -400,7 +419,7 @@ def _forecast_export_columns(forecasts: pd.DataFrame) -> pd.DataFrame:
 def _model_accuracy(regression: pd.DataFrame) -> pd.DataFrame:
     if regression.empty or "Target" not in regression.columns:
         return regression.iloc[0:0].copy()
-    keep_targets = {"target_clients", "target_stakes"}
+    keep_targets = {"target_clients", "target_stakes", "target_betcount", "target_ggr"}
     return regression[regression["Target"].isin(keep_targets)].copy()
 
 
@@ -429,6 +448,53 @@ def _score_calculation_sheet() -> pd.DataFrame:
     )
 
 
+def _write_excel(path: Path, sheets: list[tuple[str, pd.DataFrame]]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        for name, frame in sheets:
+            if not isinstance(frame, pd.DataFrame):
+                continue
+
+            excel_frame = _make_excel_safe(frame)
+            excel_frame.to_excel(writer, sheet_name=name[:31], index=False)
+            ws = writer.sheets[name[:31]]
+            ws.freeze_panes = "A2"
+
+            if name == "future_performance_score_calculator":
+                ws["F1"] = "Formula"
+                ws["F2"] = (
+                    "High client/stakes performers are games at or above each "
+                    "development 80th percentile threshold."
+                )
+                ws["F4"] = "High performer flag"
+                ws["F5"] = "Balanced high performer is marked when both client and stakes flags are true."
+
+            for column_cells in ws.columns:
+                length = max(
+                    len(str(cell.value)) if cell.value is not None else 0
+                    for cell in column_cells
+                )
+                ws.column_dimensions[column_cells[0].column_letter].width = min(max(length + 3, 12), 35)
+    return path
+
+
+def export_business_report(
+    path,
+    *,
+    comparison: pd.DataFrame,
+    forecasts: pd.DataFrame,
+) -> Path:
+    """Export the concise workbook used by business stakeholders."""
+    return _write_excel(
+        Path(path),
+        [
+            ("Holdout Comparison", _business_report_view(comparison)),
+            ("High Performers", _business_report_view(_high_performers(forecasts))),
+            ("Forecasting", _business_report_view(_forecast_export_columns(forecasts))),
+        ],
+    )
+
+
 def export_excel(
     path,
     *,
@@ -439,9 +505,8 @@ def export_excel(
     calibration: pd.DataFrame | None = None,
     configuration_leaderboard: pd.DataFrame | None = None,
 ):
-    """Export business/model outputs to an Excel workbook."""
+    """Export the complete Model Analysis workbook."""
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
     calibration = build_calibration_report(comparison) if calibration is None else calibration
 
     sheets = [
@@ -462,45 +527,4 @@ def export_excel(
         sheets.append(("Configuration Selection", configuration_leaderboard))
     sheets.append(("future_performance_score_calculator", _score_calculation_sheet()))
 
-    with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        for name, frame in sheets:
-            if not isinstance(frame, pd.DataFrame):
-                continue
-
-            excel_frame = _make_excel_safe(frame)
-
-            excel_frame.to_excel(
-                writer,
-                sheet_name=name[:31],
-                index=False,
-            )
-
-            ws = writer.sheets[name[:31]]
-
-            # Freeze header
-            ws.freeze_panes = "A2"
-
-            if name == "future_performance_score_calculator":
-                ws["F1"] = "Formula"
-                ws["F2"] = (
-                    "High client/stakes performers are games at or above each "
-                    "development 80th percentile threshold."
-                )
-                ws["F4"] = "High performer flag"
-                ws["F5"] = (
-                    "Balanced high performer is marked when both client and stakes flags are true."
-                )
-
-            # Auto-size columns
-            for column_cells in ws.columns:
-                length = max(
-                    len(str(cell.value))
-                    if cell.value is not None else 0
-                    for cell in column_cells
-                )
-
-                ws.column_dimensions[
-                    column_cells[0].column_letter
-                ].width = min(max(length + 3, 12), 35)
-
-    return path
+    return _write_excel(path, sheets)

@@ -6,12 +6,15 @@ import pandas as pd
 from .features import REGRESSION_TARGETS, build_lifecycle_snapshot, prepare_features
 
 from .modeling import (
+    NON_NEGATIVE_TARGETS,
     _baseline_prediction,
     _prediction_from_fit,
     apply_probability_calibration,
     confidence_from_prediction,
     prediction_interval_from_table,
 )
+
+MIN_HIGH_PERFORMER_THRESHOLD = 0.80
 
 
 def assign_merchandising_recommendation(
@@ -25,12 +28,12 @@ def assign_merchandising_recommendation(
 
     predicted_clients = row.get(
         "predicted_clients",
-        row.get("predicted_clients_week_4", np.nan),
+        np.nan,
     )
 
     predicted_stakes = row.get(
         "predicted_stakes",
-        row.get("predicted_stakes_week_4", np.nan),
+        np.nan,
     )
 
     has_positive_activity = (
@@ -182,22 +185,9 @@ def score_snapshot(
         result[f"predicted_{short}_low"], result[f"predicted_{short}_high"] = prediction_interval_from_table(
             pred,
             model_bundle.get("prediction_interval_tables", {}).get(target),
+            non_negative=target in NON_NEGATIVE_TARGETS,
         )
         result[f"baseline_{short}"] = baseline_pred
-
-        # Keep legacy report consumers working during the generic forecast migration.
-        result[f"predicted_{short}_week_4"] = result[f"predicted_{short}"]
-
-        prediction_low = result[f"predicted_{short}_low"]
-        prediction_high = result[f"predicted_{short}_high"]
-
-        result[
-            f"predicted_{short}_week_4_low"
-        ] = prediction_low
-
-        result[
-            f"predicted_{short}_week_4_high"
-        ] = prediction_high
 
         # =====================================================
         # GAME-SPECIFIC CONFIDENCE
@@ -282,8 +272,9 @@ def score_snapshot(
         threshold = float(
             model_bundle
             .get("classification_thresholds", {})
-            .get(goal, model_bundle.get("classification_threshold", 0.50))
+            .get(goal, model_bundle.get("classification_threshold", MIN_HIGH_PERFORMER_THRESHOLD))
         )
+        threshold = max(MIN_HIGH_PERFORMER_THRESHOLD, threshold)
 
         if goal == "performance":
             raw_column = "raw_probability_high_performance"
@@ -308,7 +299,10 @@ def score_snapshot(
         result["raw_probability_high_performance"] = result[
             ["raw_probability_high_client_performer", "raw_probability_high_stakes_performer"]
         ].min(axis=1)
-        result["classification_threshold"] = float(model_bundle.get("classification_threshold", 0.50))
+        result["classification_threshold"] = max(
+            MIN_HIGH_PERFORMER_THRESHOLD,
+            float(model_bundle.get("classification_threshold", MIN_HIGH_PERFORMER_THRESHOLD)),
+        )
         result["predicted_high_performer"] = (
             result["predicted_high_client_performer"].eq(1)
             & result["predicted_high_stakes_performer"].eq(1)
@@ -392,16 +386,12 @@ def run_daily_lifecycle_scoring(
     )
 
     status = (
-        history
-        .groupby(
-            "Game_ID",
-            as_index=False,
-        )
-        .agg(
-            Current_Age=(
-                "Days_Since_First_Observed",
-                "max",
-            )
+        history.groupby("Game_ID", as_index=False)["First_Observed_Date"]
+        .min()
+        .assign(
+            Current_Age=lambda frame: (
+                as_of_date - pd.to_datetime(frame["First_Observed_Date"])
+            ).dt.days + 1
         )
     )
 
@@ -461,6 +451,7 @@ def run_daily_lifecycle_scoring(
             checkpoint,
             horizon,
             require_future=False,
+            as_of_date=as_of_date,
         )
 
         scores = score_snapshot(snapshot, model_bundle)

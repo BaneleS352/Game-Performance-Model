@@ -13,7 +13,9 @@ def _raw_workbook(path: Path, *, sheet_name: str = "Score me") -> None:
             "SystemName": ["SYS"] * 21,
             "TournamentName": ["Game"] * 21,
             "Clients": [10] * 21,
+            "Betcount": [1000] * 21,
             "Stakes": [100] * 21,
+            "GGR": [20] * 21,
         }
     )
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
@@ -77,8 +79,71 @@ def test_score_uploaded_workbook_uses_selected_sheet(tmp_path, monkeypatch):
 
     assert loaded_sheets == ["Selected"]
     assert Path(result["report_path"]).is_file()
+    assert Path(result["business_report_path"]).name == "Business Report.xlsx"
+    assert Path(result["model_analysis_path"]).name == "Model Analysis.xlsx"
+    assert Path(result["model_analysis_path"]).is_file()
     assert Path(result["dashboard_data_path"]).is_file()
     assert result["summary"]["games_scored"] == 1
+
+
+def test_run_full_production_pipeline_runs_all_stages(tmp_path, monkeypatch):
+    workbook = tmp_path / "source.xlsx"
+    _raw_workbook(workbook)
+    calls = []
+
+    def build_features(cleaned, strategy):
+        calls.append("features")
+        return {(21, 7): cleaned.head(1)}
+
+    def train_production(snapshots, settings, **kwargs):
+        calls.append("training")
+        assert kwargs["mode"] == "production"
+        assert kwargs["max_families"] == 0
+        assert kwargs["run_regression"] is True
+        assert kwargs["run_classification"] is True
+        return {
+            "model_bundles": {(21, 7): {}},
+            "holdout_predictions": pd.DataFrame(),
+            "regression_evaluation": pd.DataFrame(),
+            "classification_evaluation": pd.DataFrame(),
+            "classification_calibration": pd.DataFrame(),
+        }
+
+    def score_production(*args, **kwargs):
+        calls.append("scoring")
+        return _forecasts(), pd.DataFrame()
+
+    monkeypatch.setattr(upload_pipeline, "build_all_historical_snapshots", build_features)
+    monkeypatch.setattr(upload_pipeline, "train_all_model_families", train_production)
+    monkeypatch.setattr(upload_pipeline, "run_daily_lifecycle_scoring", score_production)
+
+    progress = []
+    result = upload_pipeline.run_full_production_pipeline(
+        tmp_path,
+        workbook,
+        "Score me",
+        progress_callback=lambda fraction, message: progress.append((fraction, message)),
+    )
+
+    assert calls == ["features", "training", "scoring"]
+    assert [fraction for fraction, _ in progress] == [0.05, 0.18, 0.28, 0.76, 0.94, 1.0]
+    assert Path(result["model_path"]).is_file()
+    assert Path(result["business_report_path"]).is_file()
+    assert Path(result["model_analysis_path"]).is_file()
+    assert (tmp_path / "artifacts" / "processed" / "clean_game_daily.pkl").is_file()
+    assert (tmp_path / "artifacts" / "features" / "historical_snapshots.joblib").is_file()
+    assert result["training_metadata"]["pipeline_stages"] == [
+        "01_data_exploration",
+        "02_feature_engineering",
+        "03_model_experiments",
+        "04_training_and_forecasting",
+    ]
+    assert result["training_metadata"]["uploaded_data_days"] == 21
+    assert result["training_metadata"]["temporal_split_fractions"] == {
+        "training": 0.70,
+        "validation": 0.15,
+        "holdout": 0.15,
+    }
 
 
 def test_score_uploaded_workbook_reports_missing_model_and_ineligible_games(tmp_path, monkeypatch):

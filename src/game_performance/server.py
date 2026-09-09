@@ -13,11 +13,11 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from .config import Settings
-from .upload_pipeline import save_uploaded_workbook, score_uploaded_workbook, workbook_sheets
+from .upload_pipeline import run_full_production_pipeline, save_uploaded_workbook, workbook_sheets
 
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
-RUN_REPORT_PATH = re.compile(r"^/runs/([A-Za-z0-9_]+)/model_business_report\.xlsx$")
+RUN_REPORT_PATH = re.compile(r"^/runs/([A-Za-z0-9_]+)/(business-report|model-analysis)\.xlsx$")
 RUN_UPLOAD_PATH = re.compile(r"^/api/uploads/([A-Za-z0-9_]+)/run$")
 
 
@@ -55,8 +55,12 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
             raise ValueError("The workbook must be 50 MB or smaller.")
         return self.rfile.read(length)
 
-    def _serve_report(self, run_id: str) -> None:
-        path = self.state.project_root / "artifacts" / "uploads" / run_id / "model_business_report.xlsx"
+    def _serve_report(self, run_id: str, report: str) -> None:
+        filename = {
+            "business-report": "Business Report.xlsx",
+            "model-analysis": "Model Analysis.xlsx",
+        }[report]
+        path = self.state.project_root / "artifacts" / "uploads" / run_id / filename
         if not path.is_file():
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Report not found."})
             return
@@ -79,7 +83,7 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
             return
         match = RUN_REPORT_PATH.match(path)
         if match:
-            self._serve_report(match.group(1))
+            self._serve_report(match.group(1), match.group(2))
             return
         super().do_GET()
 
@@ -110,9 +114,10 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
                 sheet_name = payload.get("sheet_name")
                 if not isinstance(sheet_name, str) or not sheet_name:
                     raise ValueError("Choose a worksheet to score.")
-                result = score_uploaded_workbook(self.state.project_root, workbook_path, sheet_name)
+                result = run_full_production_pipeline(self.state.project_root, workbook_path, sheet_name)
                 result["upload_id"] = match.group(1)
-                result["report_url"] = f"/runs/{result['run_id']}/model_business_report.xlsx"
+                result["business_report_url"] = f"/runs/{result['run_id']}/business-report.xlsx"
+                result["model_analysis_url"] = f"/runs/{result['run_id']}/model-analysis.xlsx"
                 self._send_json(HTTPStatus.OK, result)
                 return
 

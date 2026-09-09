@@ -179,6 +179,32 @@ svg {
   align-items: end;
 }
 
+.upload-workflow {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.upload-requirements {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: baseline;
+  padding-left: 10px;
+  border-left: 3px solid var(--cyan);
+  color: #d7dded;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.upload-requirements strong {
+  color: #f8fbff;
+}
+
+.upload-requirements span {
+  overflow-wrap: anywhere;
+}
+
 .upload-controls label {
   display: grid;
   gap: 5px;
@@ -225,8 +251,7 @@ svg {
 }
 
 .upload-status {
-  grid-column: 1 / -1;
-  margin: -6px 0 0;
+  margin: -2px 0 0;
 }
 
 .upload-status.success {
@@ -240,6 +265,40 @@ svg {
 .upload-status a {
   color: inherit;
   font-weight: 900;
+}
+
+.report-downloads {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-left: 8px;
+}
+
+.upload-progress {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.upload-progress span {
+  display: block;
+  width: 42%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--pink), var(--purple), var(--cyan));
+  box-shadow: 0 0 16px rgba(40, 223, 255, 0.52);
+  animation: upload-progress 1.15s ease-in-out infinite;
+}
+
+@keyframes upload-progress {
+  from {
+    transform: translateX(-110%);
+  }
+
+  to {
+    transform: translateX(250%);
+  }
 }
 
 .layout-grid {
@@ -726,6 +785,11 @@ tbody tr:hover {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
+  }
+
+  .upload-progress span {
+    width: 100%;
+    transform: none;
   }
 }
 
