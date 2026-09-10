@@ -158,7 +158,13 @@ def run_full_production_pipeline(
     model_bundles = training_results.get("model_bundles")
     if not isinstance(model_bundles, dict) or not model_bundles:
         skipped = training_results.get("skipped_configurations")
-        detail = f" Skipped configurations: {len(skipped)}." if isinstance(skipped, pd.DataFrame) else ""
+        detail = ""
+        if isinstance(skipped, pd.DataFrame) and not skipped.empty:
+            reasons = "; ".join(
+                f"day {row.Checkpoint} / horizon {row.Horizon}: {row.Reason}"
+                for row in skipped.itertuples(index=False)
+            )
+            detail = f" Skipped configurations: {reasons}."
         raise ValueError(f"No production model families could be trained.{detail}")
     training_results.setdefault("training_metadata", {})["pipeline_stages"] = [
         "01_data_exploration",
