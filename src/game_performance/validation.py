@@ -17,6 +17,9 @@ def split_training_validation_holdout(
     validation_fraction: float = 0.15,
     holdout_fraction: float = 0.15,
     date_column: str = "First_Observed_Date",
+    min_training_rows: int = 1,
+    min_validation_rows: int = 1,
+    min_holdout_rows: int = 1,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, object]]:
     """Split chronological data by unique dates into train, validation, and holdout sets."""
     fractions = np.asarray((training_fraction, validation_fraction, holdout_fraction), dtype=float)
@@ -31,16 +34,40 @@ def split_training_validation_holdout(
     dates = np.sort(data[date_column].unique())
     if len(dates) < 3:
         raise ValueError("At least three unique dates are required for temporal training, validation, and holdout splits.")
+    if min_training_rows < 1 or min_validation_rows < 1 or min_holdout_rows < 1:
+        raise ValueError("Minimum split row requirements must be positive.")
 
-    counts = np.floor(len(dates) * fractions).astype(int)
-    for index in np.argsort(-(len(dates) * fractions - counts), kind="stable")[: len(dates) - counts.sum()]:
-        counts[index] += 1
-    for index in np.flatnonzero(counts == 0):
-        donor = int(np.argmax(counts))
-        counts[donor] -= 1
-        counts[index] += 1
-
-    training_dates, validation_dates, holdout_dates = np.split(dates, np.cumsum(counts)[:-1])
+    # Keep launch dates intact, but place boundaries near row-count targets.
+    # Counting dates alone fails when one launch date contains most games.
+    rows_by_date = data.groupby(date_column, sort=True).size().to_numpy()
+    cumulative_rows = np.cumsum(rows_by_date)
+    targets = len(data) * np.cumsum(fractions)[:-1]
+    total_rows = len(data)
+    first_candidates = [
+        cut
+        for cut in range(1, len(dates) - 1)
+        if cumulative_rows[cut - 1] >= min_training_rows
+        and total_rows - cumulative_rows[cut - 1] >= min_validation_rows + min_holdout_rows
+    ]
+    if not first_candidates:
+        raise ValueError("No chronological split met minimum row requirements.")
+    first_cut = min(
+        first_candidates,
+        key=lambda cut: abs(cumulative_rows[cut - 1] - targets[0]),
+    )
+    second_candidates = [
+        cut
+        for cut in range(first_cut + 1, len(dates))
+        if cumulative_rows[cut - 1] - cumulative_rows[first_cut - 1] >= min_validation_rows
+        and total_rows - cumulative_rows[cut - 1] >= min_holdout_rows
+    ]
+    if not second_candidates:
+        raise ValueError("No chronological split met minimum row requirements.")
+    second_cut = min(
+        second_candidates,
+        key=lambda cut: abs(cumulative_rows[cut - 1] - targets[1]),
+    )
+    training_dates, validation_dates, holdout_dates = np.split(dates, [first_cut, second_cut])
     training = data[data[date_column].isin(training_dates)].copy()
     validation = data[data[date_column].isin(validation_dates)].copy()
     holdout = data[data[date_column].isin(holdout_dates)].copy()

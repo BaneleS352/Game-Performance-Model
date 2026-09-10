@@ -1256,6 +1256,8 @@ def tune_shared_hyperparameters(
         training_fraction=settings.training_fraction,
         validation_fraction=settings.validation_fraction,
         holdout_fraction=settings.final_test_fraction,
+        min_training_rows=settings.min_training_rows,
+        min_validation_rows=settings.min_validation_rows,
     )
     if run_classification:
         development, validation, _ = create_high_performance_target(
@@ -1450,6 +1452,8 @@ def train_model_family(
         training_fraction=settings.training_fraction,
         validation_fraction=settings.validation_fraction,
         holdout_fraction=settings.final_test_fraction,
+        min_training_rows=settings.min_training_rows,
+        min_validation_rows=settings.min_validation_rows,
     )
     holdout_start = split_metadata["holdout_start"]
     pre_holdout = pd.concat([development, validation]).sort_values("First_Observed_Date")
@@ -1778,6 +1782,8 @@ def select_best_configuration(
             training_fraction=settings.training_fraction,
             validation_fraction=settings.validation_fraction,
             holdout_fraction=settings.final_test_fraction,
+            min_training_rows=settings.min_training_rows,
+            min_validation_rows=settings.min_validation_rows,
         )
         categorical = categorical_features(snapshot)
 
