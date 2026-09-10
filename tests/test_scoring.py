@@ -20,6 +20,14 @@ class NegativeRegressor:
         return np.array([-5.0] * len(frame))
 
 
+class ConstantRegressor:
+    def __init__(self, value):
+        self.value = value
+
+    def predict(self, frame):
+        return np.array([self.value] * len(frame))
+
+
 class DummyClassifier:
     def predict_proba(self, frame):
         return np.tile(np.array([[0.70, 0.30]]), (len(frame), 1))
@@ -77,6 +85,53 @@ def test_score_snapshot_uses_calibrated_probability_and_bundle_threshold():
     assert scored.loc[0, "predicted_high_performer"] == 0
 
 
+def test_score_snapshot_recomposes_commercial_drivers_and_flags_uncertainty():
+    snapshot = pd.DataFrame(
+        {
+            "Game_ID": ["SYS::Game"],
+            "TournamentName": ["Game"],
+            "SystemName": ["SYS"],
+            "First_Observed_Date": [pd.Timestamp("2026-01-01")],
+            "Obs_Window": [7],
+            "Horizon": [7],
+            "observation_coverage": [1.0],
+        }
+    )
+    targets = ("target_clients", "target_betcount", "target_stakes", "target_ggr")
+    bundle = {
+        "forecast_strategy": "commercial_drivers_v1",
+        "categorical_features": [],
+        "regressors": {
+            "target_clients": ConstantRegressor(10.0),
+            "target_bets_per_client": ConstantRegressor(2.0),
+            "target_stake_per_bet": ConstantRegressor(5.0),
+            "target_ggr_margin": ConstantRegressor(-0.1),
+        },
+        "target_transforms": {},
+        "blend_weights": {},
+        "confidence_tables": {
+            **{target: {"fallback": 0.8, "bins": []} for target in targets},
+            "target_clients": {"fallback": 0.4, "bins": []},
+        },
+        "prediction_interval_tables": {
+            "target_clients": {"method": "split_conformal", "absolute_residual": 1.0},
+            "target_betcount": {"method": "split_conformal", "absolute_residual": 1.0},
+            "target_stakes": {"method": "split_conformal", "absolute_residual": 60.0},
+            "target_ggr": {"method": "split_conformal", "absolute_residual": 10.0},
+        },
+    }
+
+    scored = score_snapshot(snapshot, bundle)
+
+    assert scored.loc[0, "predicted_clients"] == 10.0
+    assert scored.loc[0, "predicted_betcount"] == 20.0
+    assert scored.loc[0, "predicted_stakes"] == 100.0
+    assert scored.loc[0, "predicted_ggr"] == -10.0
+    assert scored.loc[0, "requires_review"]
+    assert "low clients confidence" in scored.loc[0, "review_reason"]
+    assert "wide stakes interval" in scored.loc[0, "review_reason"]
+
+
 def test_score_snapshot_emits_separate_client_and_stakes_goal_probabilities():
     snapshot = pd.DataFrame(
         {
@@ -129,7 +184,7 @@ def test_score_snapshot_forecasts_betcount_and_signed_ggr():
 
     scored = score_snapshot(snapshot, bundle)
 
-    assert scored.loc[0, "predicted_betcount"] == 24
+    assert np.isclose(scored.loc[0, "predicted_betcount"], 24)
     assert scored.loc[0, "predicted_ggr"] == -5
     assert scored.loc[0, "predicted_ggr_low"] == -8
 
@@ -192,8 +247,8 @@ def test_daily_scoring_emits_all_eligible_checkpoint_families():
 
     predictions, _ = run_daily_lifecycle_scoring(
         data,
-        {(14, 14): bundle, (21, 7): bundle},
-        {14: [14], 21: [7]},
+        {(14, 7): bundle, (21, 7): bundle},
+        {14: [7], 21: [7]},
     )
 
     assert set(predictions["Checkpoint"]) == {14, 21}

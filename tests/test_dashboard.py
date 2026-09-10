@@ -162,3 +162,32 @@ def test_dashboard_uses_latest_checkpoint_holdout_metrics():
         assert data["summary"]["avg_probability_stakes"] == 0.9
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_dashboard_review_candidates_exclude_unflagged_games():
+    workspace = Path("artifacts/test_dashboard")
+    workbook = workspace / "report.xlsx"
+    try:
+        workspace.mkdir(parents=True, exist_ok=True)
+        forecasts = pd.DataFrame(
+            {
+                "Game_ID": ["SYS::Review", "SYS::Routine"],
+                "SystemName": ["SYS", "SYS"],
+                "predicted_clients": [10, 20],
+                "confidence_clients": [0.4, 0.9],
+                "predicted_stakes": [100, 500],
+                "confidence_stakes": [0.8, 0.9],
+                "requires_review": [True, False],
+                "review_reason": ["low clients confidence", ""],
+                "review_priority": [0.2, 0.0],
+            }
+        )
+        with pd.ExcelWriter(workbook, engine="openpyxl") as writer:
+            pd.DataFrame({"Game_ID": ["SYS::Review"]}).to_excel(writer, sheet_name="Holdout Comparison", index=False)
+            forecasts.to_excel(writer, sheet_name="Forecasts", index=False)
+
+        data = build_dashboard_data(workbook)
+
+        assert [row["Game_ID"] for row in data["review_candidates"]] == ["SYS::Review"]
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)

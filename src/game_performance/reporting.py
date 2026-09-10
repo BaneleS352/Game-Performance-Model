@@ -401,6 +401,9 @@ def _forecast_export_columns(forecasts: pd.DataFrame) -> pd.DataFrame:
         "predicted_stakes",
         "predicted_stakes_high",
         "confidence_stakes",
+        "requires_review",
+        "review_reason",
+        "review_priority",
         "probability_high_client_performer",
         "predicted_high_client_performer",
         "probability_high_stakes_performer",
@@ -504,6 +507,7 @@ def export_excel(
     classification: pd.DataFrame,
     calibration: pd.DataFrame | None = None,
     configuration_leaderboard: pd.DataFrame | None = None,
+    uncertainty_validation: pd.DataFrame | None = None,
 ):
     """Export the complete Model Analysis workbook."""
     path = Path(path)
@@ -520,6 +524,7 @@ def export_excel(
         for name, frame in (
             ("Classification Metrics", classification),
             ("Calibration", calibration),
+            ("Uncertainty Validation", uncertainty_validation),
         )
         if isinstance(frame, pd.DataFrame) and not frame.empty
     )

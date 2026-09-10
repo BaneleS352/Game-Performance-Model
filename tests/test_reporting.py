@@ -136,6 +136,13 @@ def test_export_excel_keeps_all_regression_metrics_and_calibration_sheets():
                 }
             ),
             classification=pd.DataFrame(),
+            uncertainty_validation=pd.DataFrame(
+                {
+                    "Target": ["target_stakes"],
+                    "Segment_Type": ["Provider"],
+                    "Observed_Coverage": [0.8],
+                }
+            ),
         )
 
         workbook = load_workbook(path, read_only=True)
@@ -145,6 +152,7 @@ def test_export_excel_keeps_all_regression_metrics_and_calibration_sheets():
             "High Performers",
             "Forecasts",
             "Model Accuracy",
+            "Uncertainty Validation",
             "future_performance_score_calcul",
         ]
 

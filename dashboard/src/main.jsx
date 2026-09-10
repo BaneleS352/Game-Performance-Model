@@ -53,6 +53,7 @@ const stakesRangeColumn = {
 };
 const confidenceClientsColumn = { key: "confidence_clients", label: "Confidence Clients", type: "percent", width: "150px" };
 const confidenceStakesColumn = { key: "confidence_stakes", label: "Confidence Stakes", type: "percent", width: "150px" };
+const reviewReasonColumn = { key: "review_reason", label: "Review Reason", type: "text", width: "260px" };
 const clientLedgerColumns = [
   ...baseLedgerColumns,
   clientRangeColumn,
@@ -70,6 +71,7 @@ const fullPerformanceLedgerColumns = [
   confidenceClientsColumn,
   confidenceStakesColumn,
 ];
+const reviewLedgerColumns = [...fullPerformanceLedgerColumns, reviewReasonColumn];
 const ledgerModes = {
   top_games: {
     label: "Top Games",
@@ -91,9 +93,9 @@ const ledgerModes = {
   },
   review: {
     label: "Games to Review",
-    sortKey: "combined_performance",
-    direction: "asc",
-    columns: fullPerformanceLedgerColumns,
+    sortKey: "review_priority",
+    direction: "desc",
+    columns: reviewLedgerColumns,
   },
 };
 
@@ -197,6 +199,7 @@ function DashboardView({ data, onDashboardData }) {
     const activeMode = ledgerModes[ledgerMode];
     const filteredRows = [...(data.forecasts ?? [])]
       .filter((row) => !system || row.SystemName === system)
+      .filter((row) => ledgerMode !== "review" || row.requires_review)
       .filter((row) => {
         if (!query) return true;
         return columns.some((column) => String(row[column.key] ?? "").toLowerCase().includes(query));

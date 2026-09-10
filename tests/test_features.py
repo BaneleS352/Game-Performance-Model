@@ -39,11 +39,11 @@ def test_historical_snapshot_targets_all_regression_metrics():
         7,
     )
 
-    assert [column for column in snapshot.columns if column.startswith("target_")] == [
+    assert {
         "target_clients", "target_stakes", "target_betcount", "target_ggr",
         "target_clients_week_1", "target_clients_week_2",
         "target_stakes_week_1", "target_stakes_week_2",
-    ]
+    }.issubset(snapshot.columns)
 
 
 def test_snapshot_targets_the_next_seven_days():
@@ -58,6 +58,32 @@ def test_snapshot_targets_the_next_seven_days():
     assert snapshot.loc[0, "target_stakes"] == 70
     assert snapshot.loc[0, "target_betcount"] == 14
     assert snapshot.loc[0, "target_ggr"] == 7
+
+
+def test_snapshot_adds_commercial_driver_targets_and_margin_features():
+    snapshot = build_lifecycle_snapshot(
+        _daily_data(14, Clients=[2] * 14, Betcount=[6] * 14, Stakes=[30] * 14, GGR=[-3] * 14),
+        7,
+        7,
+    )
+
+    assert snapshot.loc[0, "target_bets_per_client"] == 3
+    assert snapshot.loc[0, "target_stake_per_bet"] == 5
+    assert snapshot.loc[0, "target_ggr_margin"] == -0.1
+    assert snapshot.loc[0, "ggr_margin"] == -0.1
+    assert snapshot.loc[0, "ggr_margin_week_1"] == -0.1
+
+
+def test_commercial_driver_targets_are_missing_when_future_denominators_are_zero():
+    snapshot = build_lifecycle_snapshot(
+        _daily_data(14, Clients=([2] * 7) + ([0] * 7), Betcount=([6] * 7) + ([0] * 7), Stakes=([30] * 7) + ([0] * 7)),
+        7,
+        7,
+    )
+
+    assert pd.isna(snapshot.loc[0, "target_bets_per_client"])
+    assert pd.isna(snapshot.loc[0, "target_stake_per_bet"])
+    assert pd.isna(snapshot.loc[0, "target_ggr_margin"])
 
 
 def test_latest_snapshot_uses_the_final_as_of_date_for_the_forecast_window():

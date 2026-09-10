@@ -32,6 +32,9 @@ DEFAULT_FORECAST_COLUMNS = {
     "predicted_ggr",
     "predicted_ggr_high",
     "confidence_ggr",
+    "requires_review",
+    "review_reason",
+    "review_priority",
     "probability_high_client_performer",
     "predicted_high_client_performer",
     "probability_high_stakes_performer",
@@ -204,14 +207,15 @@ def build_dashboard_data(workbook_path: str | Path) -> dict[str, Any]:
 
     top_stakes = forecasts.sort_values("predicted_stakes", ascending=False).head(250)
     top_clients = forecasts.sort_values("predicted_clients", ascending=False).head(250)
-    observation_coverage = pd.to_numeric(
-        forecasts.get("observation_coverage", pd.Series(1.0, index=forecasts.index)),
-        errors="coerce",
-    ).fillna(1)
     review_candidates = forecasts.assign(
-        value_rank=forecasts["predicted_stakes"].rank(ascending=False, method="first"),
-        coverage_gap=1 - observation_coverage,
-    ).sort_values(["coverage_gap", "predicted_stakes"], ascending=[False, False]).head(250)
+        requires_review=forecasts.get("requires_review", pd.Series(False, index=forecasts.index)).fillna(False),
+        review_priority=pd.to_numeric(
+            forecasts.get("review_priority", pd.Series(0, index=forecasts.index)), errors="coerce"
+        ).fillna(0),
+    )
+    review_candidates = review_candidates[review_candidates["requires_review"]].sort_values(
+        ["review_priority", "predicted_stakes"], ascending=[False, False]
+    ).head(250)
 
     return {
         "summary": summary,

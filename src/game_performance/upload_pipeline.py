@@ -226,6 +226,7 @@ def run_full_production_pipeline(
         classification=training_results.get("classification_evaluation", pd.DataFrame()),
         calibration=training_results.get("classification_calibration"),
         configuration_leaderboard=training_results.get("configuration_leaderboard"),
+        uncertainty_validation=training_results.get("uncertainty_validation"),
     )
     staged_dashboard = run_dir / "dashboard"
     staged_data_path = export_dashboard(model_analysis_path, staged_dashboard)

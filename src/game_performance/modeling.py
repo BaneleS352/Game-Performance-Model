@@ -18,7 +18,13 @@ from sklearn.metrics import (
 )
 
 from .config import Settings
-from .features import REGRESSION_TARGETS, categorical_features, prepare_features
+from .features import (
+    COMMERCIAL_DRIVER_TARGETS,
+    OUTCOME_TARGETS,
+    REGRESSION_TARGETS,
+    categorical_features,
+    prepare_features,
+)
 from .validation import (
     create_high_performance_target,
     regression_metrics,
@@ -29,7 +35,13 @@ from .validation import (
 
 TrainingMode = Literal["quick", "standard", "production"]
 
-NON_NEGATIVE_TARGETS = {"target_clients", "target_stakes", "target_betcount"}
+NON_NEGATIVE_TARGETS = {
+    "target_clients",
+    "target_bets_per_client",
+    "target_stake_per_bet",
+    "target_betcount",
+    "target_stakes",
+}
 ProbabilityCalibrator = dict[str, Any]
 CLASSIFICATION_TARGETS = {
     "client": "is_high_client_performer",
@@ -321,6 +333,35 @@ def build_prediction_interval_table(
     return table
 
 
+def build_conformal_interval_table(
+    actual: Iterable[float],
+    predicted: Iterable[float],
+    *,
+    coverage: float = 0.80,
+) -> dict[str, Any]:
+    """Build a split-conformal interval from out-of-fold absolute residuals."""
+    if not 0 < coverage < 1:
+        raise ValueError("coverage must be strictly between 0 and 1.")
+
+    valid = pd.DataFrame(
+        {
+            "actual": pd.to_numeric(pd.Series(actual), errors="coerce"),
+            "predicted": pd.to_numeric(pd.Series(predicted), errors="coerce"),
+        }
+    ).replace([np.inf, -np.inf], np.nan).dropna()
+    if valid.empty:
+        return {"method": "split_conformal", "coverage": coverage, "absolute_residual": 0.0, "rows": 0}
+
+    residual = (valid["actual"] - valid["predicted"]).abs().to_numpy(dtype="float64")
+    quantile = min(1.0, float(np.ceil((len(residual) + 1) * coverage) / len(residual)))
+    return {
+        "method": "split_conformal",
+        "coverage": coverage,
+        "absolute_residual": float(np.quantile(residual, quantile, method="higher")),
+        "rows": int(len(residual)),
+    }
+
+
 def prediction_interval_from_table(
     predicted: Iterable[float],
     table: dict[str, float] | None,
@@ -329,6 +370,13 @@ def prediction_interval_from_table(
 ) -> tuple[np.ndarray, np.ndarray]:
     prediction = np.asarray(predicted, dtype="float64")
     table = table or {}
+    if table.get("method") == "split_conformal":
+        residual = float(table.get("absolute_residual", 0.0))
+        low, high = prediction - residual, prediction + residual
+        if non_negative:
+            low, high = np.maximum(low, 0), np.maximum(high, 0)
+        return low, high
+
     lower_residual = np.full(len(prediction), float(table.get("lower_residual", 0.0)))
     upper_residual = np.full(len(prediction), float(table.get("upper_residual", 0.0)))
     bands = table.get("bins", [])
@@ -682,6 +730,15 @@ def _baseline_prediction(frame: pd.DataFrame, target: str) -> np.ndarray:
     def constrain(values: np.ndarray) -> np.ndarray:
         return np.maximum(values, 0) if target in NON_NEGATIVE_TARGETS else values
 
+    driver_feature = {
+        "target_bets_per_client": "bets_per_client",
+        "target_stake_per_bet": "stake_per_bet",
+        "target_ggr_margin": "ggr_margin",
+    }.get(target)
+    if driver_feature is not None:
+        values = pd.to_numeric(frame.get(driver_feature, pd.Series(np.nan, index=frame.index)), errors="coerce")
+        return constrain(values.fillna(0).to_numpy(dtype="float64"))
+
     short = target.replace("target_", "")
     recent_values = frame[f"{short}_last_7_mean"] if f"{short}_last_7_mean" in frame.columns else None
     recent_mean = pd.to_numeric(recent_values, errors="coerce") if recent_values is not None else None
@@ -714,6 +771,22 @@ def _baseline_prediction(frame: pd.DataFrame, target: str) -> np.ndarray:
     if week_2_column in frame.columns:
         return constrain(pd.to_numeric(frame[week_2_column], errors="coerce").fillna(0).to_numpy())
     return np.zeros(len(frame), dtype="float64")
+
+
+def derive_commercial_outputs(driver_values: dict[str, Iterable[float]]) -> dict[str, np.ndarray]:
+    """Recompose compatible commercial outcomes from the four driver forecasts."""
+    clients = np.maximum(np.asarray(driver_values["target_clients"], dtype="float64"), 0)
+    bets_per_client = np.maximum(np.asarray(driver_values["target_bets_per_client"], dtype="float64"), 0)
+    stake_per_bet = np.maximum(np.asarray(driver_values["target_stake_per_bet"], dtype="float64"), 0)
+    ggr_margin = np.asarray(driver_values["target_ggr_margin"], dtype="float64")
+    betcount = clients * bets_per_client
+    stakes = betcount * stake_per_bet
+    return {
+        "target_clients": clients,
+        "target_betcount": betcount,
+        "target_stakes": stakes,
+        "target_ggr": stakes * ggr_margin,
+    }
 
 
 def _best_blend_weight(actual: Iterable[float], model_prediction: np.ndarray, baseline_prediction: np.ndarray) -> float:
@@ -1238,6 +1311,7 @@ def _base_prediction_frame(holdout: pd.DataFrame) -> pd.DataFrame:
         "Game_ID",
         "TournamentName",
         "SystemName",
+        "Provider",
         "First_Observed_Date",
         "Obs_Window",
         "Horizon",
@@ -1248,6 +1322,112 @@ def _base_prediction_frame(holdout: pd.DataFrame) -> pd.DataFrame:
         "is_high_performer",
     ]
     return holdout[[column for column in columns if column in holdout.columns]].copy()
+
+
+def _rolling_oof_regression_predictions(
+    frame: pd.DataFrame,
+    target: str,
+    params: dict[str, Any],
+    categorical: list[str],
+    settings: Settings,
+    mode: TrainingMode | None,
+    training_window_days: int | None,
+) -> tuple[pd.DataFrame, list[int]]:
+    """Return strictly forward out-of-fold predictions for one driver."""
+    records: list[pd.DataFrame] = []
+    iterations: list[int] = []
+    transform = _target_transform(params, target)
+    fallback_iterations = int(_setting(settings, "regressor_iterations", _budget(settings, mode)["regressor_iterations"]))
+
+    for train, validation in _adaptive_rolling_date_splits(frame, settings, training_window_days):
+        train = train.dropna(subset=[target]).copy()
+        validation = validation.dropna(subset=[target]).copy()
+        if train.empty or validation.empty:
+            continue
+        model = _build_regressor(params, settings, mode)
+        _fit_regressor(model, train, validation, target, categorical, settings, mode, transform)
+        model_prediction = _prediction_from_fit(
+            target,
+            model.predict(prepare_features(validation, categorical)),
+            transform,
+        )
+        records.append(
+            pd.DataFrame(
+                {
+                    "actual": validation[target].to_numpy(dtype="float64"),
+                    "model_prediction": model_prediction,
+                    "baseline_prediction": _baseline_prediction(validation, target),
+                },
+                index=validation.index,
+            )
+        )
+        iterations.append(_fitted_iterations(model, fallback_iterations))
+
+    return (pd.concat(records).sort_index() if records else pd.DataFrame()), iterations
+
+
+def _uncertainty_validation(
+    predictions: pd.DataFrame,
+    *,
+    checkpoint: int,
+    horizon: int,
+    coverage: float,
+) -> pd.DataFrame:
+    """Validate holdout interval coverage by age, provider/system, and value band."""
+    if predictions.empty:
+        return pd.DataFrame()
+
+    provider = predictions.get("Provider", predictions.get("SystemName", pd.Series("Unknown", index=predictions.index)))
+    provider = provider.fillna("Unknown").astype("string")
+    volume = pd.Series("All", index=predictions.index, dtype="string")
+    stakes = pd.to_numeric(
+        predictions.get("predicted_stakes", pd.Series(np.nan, index=predictions.index)), errors="coerce"
+    )
+    if stakes.notna().sum() >= 3 and stakes.nunique(dropna=True) >= 3:
+        try:
+            volume = pd.qcut(stakes, 3, labels=("Low", "Medium", "High"), duplicates="drop").astype("string")
+        except ValueError:
+            pass
+
+    segments = {
+        "Age / Checkpoint": pd.Series(str(checkpoint), index=predictions.index),
+        "Provider": provider,
+        "Volume": volume.fillna("Unknown"),
+    }
+    rows: list[dict[str, Any]] = []
+    for target in OUTCOME_TARGETS:
+        short = target.removeprefix("target_")
+        actual = pd.to_numeric(
+            predictions.get(f"actual_{short}", pd.Series(np.nan, index=predictions.index)), errors="coerce"
+        )
+        low = pd.to_numeric(
+            predictions.get(f"predicted_{short}_low", pd.Series(np.nan, index=predictions.index)), errors="coerce"
+        )
+        high = pd.to_numeric(
+            predictions.get(f"predicted_{short}_high", pd.Series(np.nan, index=predictions.index)), errors="coerce"
+        )
+        valid = actual.notna() & low.notna() & high.notna()
+        if not valid.any():
+            continue
+        for segment_type, values in segments.items():
+            for segment, index in values[valid].groupby(values[valid], dropna=False).groups.items():
+                mask = valid.copy()
+                mask.loc[:] = False
+                mask.loc[index] = True
+                rows.append(
+                    {
+                        "Checkpoint": checkpoint,
+                        "Horizon": horizon,
+                        "Target": target,
+                        "Segment_Type": segment_type,
+                        "Segment": str(segment),
+                        "Rows": int(mask.sum()),
+                        "Nominal_Coverage": coverage,
+                        "Observed_Coverage": float(actual[mask].between(low[mask], high[mask], inclusive="both").mean()),
+                        "Average_Range_Width": float((high[mask] - low[mask]).mean()),
+                    }
+                )
+    return pd.DataFrame(rows)
 
 
 def train_model_family(
@@ -1272,6 +1452,12 @@ def train_model_family(
         holdout_fraction=settings.final_test_fraction,
     )
     holdout_start = split_metadata["holdout_start"]
+    pre_holdout = pd.concat([development, validation]).sort_values("First_Observed_Date")
+    pre_holdout = restrict_training_window(
+        pre_holdout,
+        training_window_days,
+        reference_date=pd.Timestamp(holdout_start),
+    )
     development = restrict_training_window(
         development,
         training_window_days,
@@ -1287,12 +1473,16 @@ def train_model_family(
         _, holdout, _ = create_high_performance_target(development, holdout, settings.high_performer_percentile)
     categorical = categorical_features(snapshot)
     selected_targets = list(targets or REGRESSION_TARGETS)
+    if run_regression and set(selected_targets) != set(COMMERCIAL_DRIVER_TARGETS):
+        raise ValueError("Commercial forecasting requires all four commercial driver targets.")
 
     bundle: dict[str, Any] = {
         "checkpoint": checkpoint,
         "horizon": horizon,
         "categorical_features": categorical,
         "regressors": {},
+        "forecast_strategy": "commercial_drivers_v1",
+        "commercial_driver_targets": list(COMMERCIAL_DRIVER_TARGETS),
         "target_transforms": {},
         "regression_target_transforms": {},
         "classifier": None,
@@ -1304,6 +1494,8 @@ def train_model_family(
         "best_parameters": {},
         "confidence_scores": {},
         "prediction_interval_tables": {},
+        "review_confidence_threshold": float(_setting(settings, "review_confidence_threshold", 0.50)),
+        "review_relative_width_threshold": float(_setting(settings, "review_relative_width_threshold", 1.00)),
         "high_score_threshold": threshold,
         "holdout_start_date": holdout_start,
         "tuned_on_checkpoint": tuning_checkpoint,
@@ -1316,128 +1508,137 @@ def train_model_family(
     predictions = _base_prediction_frame(holdout)
 
     if run_regression:
+        driver_predictions: dict[str, np.ndarray] = {}
+        driver_baselines: dict[str, np.ndarray] = {}
+        oof_predictions: dict[str, pd.DataFrame] = {}
+        fitted_iterations: dict[str, int] = {}
+
         for target in selected_targets:
             params = shared_parameters.get("regressors", {}).get(target)
             if params is None:
-                continue
+                raise ValueError(f"No tuned parameters were available for commercial driver {target}.")
+            train_target = pre_holdout.dropna(subset=[target]).copy()
+            if train_target.empty:
+                raise ValueError(f"No pre-holdout rows are available for commercial driver {target}.")
 
-            development_target = development.dropna(subset=[target]).copy()
-            validation_target = validation.dropna(subset=[target]).copy()
-            holdout_target = holdout.dropna(subset=[target]).copy()
-            if development_target.empty or holdout_target.empty:
-                continue
-
-            validation_for_fit = validation_target if not validation_target.empty else None
-
-            probe_model = _build_regressor(params, settings, mode)
-            target_transform = _target_transform(params, target)
-            _fit_regressor(
-                probe_model,
-                development_target,
-                validation_for_fit,
+            oof, fold_iterations = _rolling_oof_regression_predictions(
+                pre_holdout,
                 target,
+                params,
                 categorical,
                 settings,
                 mode,
-                target_transform,
+                training_window_days,
             )
-            baseline = _baseline_prediction(holdout_target, target)
-            baseline_metrics = regression_metrics(holdout_target[target], baseline)
-            blend_weight = 1.0
+            if oof.empty:
+                raise ValueError(f"No rolling out-of-fold predictions were available for commercial driver {target}.")
 
-            if validation_for_fit is not None:
-                validation_prediction = _prediction_from_fit(
-                    target,
-                    probe_model.predict(prepare_features(validation_for_fit, categorical)),
-                    target_transform,
-                )
-                validation_baseline = _baseline_prediction(validation_for_fit, target)
-                blend_weight = _best_blend_weight(validation_for_fit[target], validation_prediction, validation_baseline)
-                validation_prediction = blend_weight * validation_prediction + (1 - blend_weight) * validation_baseline
-                confidence_table = build_confidence_table(validation_for_fit[target], validation_prediction)
-                interval_table = build_prediction_interval_table(validation_for_fit[target], validation_prediction)
-            else:
-                confidence_table = {"fallback": np.nan, "bins": []}
-                interval_table = {"lower_residual": 0.0, "upper_residual": 0.0}
-
-            selected_iterations = _fitted_iterations(
-                probe_model,
-                int(_setting(settings, "regressor_iterations", _budget(settings, mode)["regressor_iterations"])),
-            )
+            blend_weight = _best_blend_weight(oof["actual"], oof["model_prediction"].to_numpy(), oof["baseline_prediction"].to_numpy())
+            oof["prediction"] = blend_weight * oof["model_prediction"] + (1 - blend_weight) * oof["baseline_prediction"]
+            fallback_iterations = int(_setting(settings, "regressor_iterations", _budget(settings, mode)["regressor_iterations"]))
+            selected_iterations = int(np.median(fold_iterations)) if fold_iterations else fallback_iterations
+            transform = _target_transform(params, target)
             model = _build_regressor(params, settings, mode, iterations=selected_iterations)
-            _fit_regressor(model, development_target, None, target, categorical, settings, mode, target_transform)
-            model_prediction = _prediction_from_fit(
-                target,
-                model.predict(prepare_features(holdout_target, categorical)),
-                target_transform,
-            )
-            prediction = blend_weight * model_prediction + (1 - blend_weight) * baseline
-            prediction_low, prediction_high = prediction_interval_from_table(
-                prediction, interval_table, non_negative=target in NON_NEGATIVE_TARGETS
-            )
-            metrics = regression_metrics(holdout_target[target], prediction)
-            actual_values = holdout_target[target].to_numpy(dtype="float64")
-            valid_range = ~np.isnan(actual_values) & ~np.isnan(prediction_low) & ~np.isnan(prediction_high)
-            range_contains_actual = (
-                np.mean((actual_values[valid_range] >= prediction_low[valid_range]) & (actual_values[valid_range] <= prediction_high[valid_range]))
-                if valid_range.any()
-                else np.nan
-            )
-            
-            metric_confidence = _confidence_from_wape(metrics["WAPE"])
-            if pd.isna(metric_confidence):
-                metric_confidence = confidence_table.get("fallback", np.nan)
-            confidence_table["fallback"] = metric_confidence
+            _fit_regressor(model, train_target, None, target, categorical, settings, mode, transform)
 
-            confidence = confidence_from_prediction(
-                prediction,
-                confidence_table,
-                holdout_target.get(
-                    "observation_coverage"
-                )
+            model_prediction = _prediction_from_fit(target, model.predict(prepare_features(holdout, categorical)), transform)
+            baseline = _baseline_prediction(holdout, target)
+            driver_predictions[target] = blend_weight * model_prediction + (1 - blend_weight) * baseline
+            driver_baselines[target] = baseline
+            oof_predictions[target] = oof
+            fitted_iterations[target] = selected_iterations
+            bundle["regressors"][target] = model
+            bundle["best_parameters"][target] = params
+            bundle["target_transforms"][target] = transform
+            bundle["regression_target_transforms"][target] = transform
+            bundle.setdefault("blend_weights", {})[target] = blend_weight
+
+        oof_driver_predictions: dict[str, np.ndarray] = {}
+        oof_driver_baselines: dict[str, np.ndarray] = {}
+        for target in COMMERCIAL_DRIVER_TARGETS:
+            prediction = pd.Series(np.nan, index=pre_holdout.index, dtype="float64")
+            baseline = pd.Series(np.nan, index=pre_holdout.index, dtype="float64")
+            prediction.loc[oof_predictions[target].index] = oof_predictions[target]["prediction"]
+            baseline.loc[oof_predictions[target].index] = oof_predictions[target]["baseline_prediction"]
+            oof_driver_predictions[target] = prediction.to_numpy()
+            oof_driver_baselines[target] = baseline.to_numpy()
+
+        outcome_predictions = derive_commercial_outputs(driver_predictions)
+        outcome_baselines = derive_commercial_outputs(driver_baselines)
+        oof_outcomes = derive_commercial_outputs(oof_driver_predictions)
+        oof_baselines = derive_commercial_outputs(oof_driver_baselines)
+        coverage = float(_setting(settings, "prediction_interval_coverage", 0.80))
+
+        for target in OUTCOME_TARGETS:
+            short_name = target.removeprefix("target_")
+            oof_actual = pd.to_numeric(pre_holdout[target], errors="coerce").to_numpy(dtype="float64")
+            oof_prediction = oof_outcomes[target]
+            oof_valid = ~np.isnan(oof_actual) & ~np.isnan(oof_prediction)
+            if not oof_valid.any():
+                raise ValueError(f"No valid out-of-fold outcome predictions were available for {target}.")
+            confidence_table = build_confidence_table(oof_actual[oof_valid], oof_prediction[oof_valid])
+            oof_metrics = regression_metrics(oof_actual[oof_valid], oof_prediction[oof_valid])
+            metric_confidence = _confidence_from_wape(oof_metrics["WAPE"])
+            confidence_table["fallback"] = metric_confidence
+            interval_table = build_conformal_interval_table(
+                oof_actual[oof_valid], oof_prediction[oof_valid], coverage=coverage
             )
+
+            actual = pd.to_numeric(holdout[target], errors="coerce").to_numpy(dtype="float64")
+            prediction = outcome_predictions[target]
+            baseline = outcome_baselines[target]
+            prediction_low, prediction_high = prediction_interval_from_table(
+                prediction,
+                interval_table,
+                non_negative=target in NON_NEGATIVE_TARGETS,
+            )
+            valid = ~np.isnan(actual) & ~np.isnan(prediction)
+            metrics = regression_metrics(actual[valid], prediction[valid]) if valid.any() else {"MAE": np.nan, "RMSE": np.nan, "R2": np.nan, "WAPE": np.nan}
+            baseline_metrics = regression_metrics(actual[valid], baseline[valid]) if valid.any() else metrics
+            range_valid = valid & ~np.isnan(prediction_low) & ~np.isnan(prediction_high)
+            range_coverage = float(
+                np.mean((actual[range_valid] >= prediction_low[range_valid]) & (actual[range_valid] <= prediction_high[range_valid]))
+            ) if range_valid.any() else np.nan
+            confidence = confidence_from_prediction(prediction, confidence_table, holdout.get("observation_coverage"))
 
             evaluations.append(
                 {
                     "Checkpoint": checkpoint,
                     "Horizon": horizon,
                     "Target": target,
-                    "Target_Transform": target_transform,
+                    "Target_Transform": "derived",
                     "Holdout_Start": holdout_start,
-                    "Best_Iteration": selected_iterations,
-                    **params,
+                    "Commercial_Drivers": ", ".join(COMMERCIAL_DRIVER_TARGETS),
+                    "OOF_Rows": int(oof_valid.sum()),
                     **metrics,
-                    "Model_Blend_Weight": blend_weight,
                     "Baseline_MAE": baseline_metrics["MAE"],
                     "Baseline_RMSE": baseline_metrics["RMSE"],
                     "Baseline_R2": baseline_metrics["R2"],
                     "Baseline_WAPE": baseline_metrics["WAPE"],
                     "WAPE_Improvement": baseline_metrics["WAPE"] - metrics["WAPE"],
-                    "Range_Coverage": float(range_contains_actual),
+                    "Range_Coverage": range_coverage,
                     "Average_Range_Width": float(np.nanmean(prediction_high - prediction_low)),
+                    "Interval_Method": interval_table["method"],
+                    "Interval_Nominal_Coverage": coverage,
                 }
             )
-            bundle["regressors"][target] = model
-            bundle["best_parameters"][target] = params
-            bundle["target_transforms"][target] = target_transform
-            bundle["regression_target_transforms"][target] = target_transform
-            bundle.setdefault("blend_weights", {})[target] = blend_weight
             bundle.setdefault("confidence_tables", {})[target] = confidence_table
             bundle["prediction_interval_tables"][target] = interval_table
             bundle["confidence_scores"][target] = float(metric_confidence)
-            short_name = target.replace("target_", "")
-            predictions.loc[holdout_target.index, f"actual_{short_name}"] = holdout_target[target]
-            predictions.loc[holdout_target.index, f"baseline_{short_name}"] = baseline
-            predictions.loc[holdout_target.index, f"predicted_{short_name}_low"] = prediction_low
-            predictions.loc[holdout_target.index, f"predicted_{short_name}"] = prediction
-            predictions.loc[holdout_target.index, f"predicted_{short_name}_high"] = prediction_high
-            predictions.loc[holdout_target.index, f"confidence_{short_name}"] = confidence
-            for week in (1, 2):
-                week_column = f"{target}_week_{week}"
-                if week_column in holdout_target.columns:
-                    predictions.loc[holdout_target.index, f"actual_{short_name}_week_{week}"] = holdout_target[
-                        week_column
-                    ]
+            predictions[f"actual_{short_name}"] = actual
+            predictions[f"baseline_{short_name}"] = baseline
+            predictions[f"predicted_{short_name}_low"] = prediction_low
+            predictions[f"predicted_{short_name}"] = prediction
+            predictions[f"predicted_{short_name}_high"] = prediction_high
+            predictions[f"confidence_{short_name}"] = confidence
+
+        bundle["driver_fitted_iterations"] = fitted_iterations
+        bundle["uncertainty_validation"] = _uncertainty_validation(
+            predictions,
+            checkpoint=checkpoint,
+            horizon=horizon,
+            coverage=coverage,
+        )
 
     class_eval: list[dict[str, Any]] = []
     calibration_frames: list[pd.DataFrame] = []
@@ -1616,7 +1817,9 @@ def select_best_configuration(
                     "Horizon": horizon,
                     "Training_Window_Days": training_window_days,
                     "WAPE_Clients": target_scores.get("target_clients", np.nan),
-                    "WAPE_Stakes": target_scores.get("target_stakes", np.nan),
+                    "WAPE_Bets_Per_Client": target_scores.get("target_bets_per_client", np.nan),
+                    "WAPE_Stake_Per_Bet": target_scores.get("target_stake_per_bet", np.nan),
+                    "WAPE_GGR_Margin": target_scores.get("target_ggr_margin", np.nan),
                     "Mean_WAPE": float(np.mean(list(target_scores.values()))),
                     "Validation_Folds": min(fold_counts) if fold_counts else 0,
                     "Selection_Mode": selection_mode,
@@ -1624,7 +1827,7 @@ def select_best_configuration(
             )
 
     evaluation = pd.DataFrame(records).sort_values(
-        ["Mean_WAPE", "WAPE_Clients", "WAPE_Stakes", "Checkpoint"],
+        ["Mean_WAPE", "WAPE_Clients", "WAPE_Bets_Per_Client", "Checkpoint"],
         kind="stable",
     ).reset_index(drop=True)
     if evaluation.empty:
@@ -1688,6 +1891,7 @@ def train_selected_model_configuration(
     return {
         "model_bundles": {key: bundle},
         "regression_evaluation": regression,
+        "uncertainty_validation": bundle.get("uncertainty_validation", pd.DataFrame()),
         "classification_evaluation": pd.DataFrame(classification),
         "classification_calibration": calibration,
         "hyperparameter_tuning": tuning,
@@ -1748,6 +1952,7 @@ def train_all_model_families(
     regression_frames: list[pd.DataFrame] = []
     classification_rows: list[dict[str, Any]] = []
     calibration_frames: list[pd.DataFrame] = []
+    uncertainty_frames: list[pd.DataFrame] = []
     prediction_frames: list[pd.DataFrame] = []
     tuning_frames: list[pd.DataFrame] = []
     skipped: list[dict[str, Any]] = []
@@ -1800,6 +2005,9 @@ def train_all_model_families(
                 classification_rows.extend(classification_eval)
             if not calibration_bins.empty:
                 calibration_frames.append(calibration_bins)
+            uncertainty = bundle.get("uncertainty_validation")
+            if isinstance(uncertainty, pd.DataFrame) and not uncertainty.empty:
+                uncertainty_frames.append(uncertainty)
             if not predictions.empty:
                 prediction_frames.append(predictions)
         except ValueError as exc:
@@ -1812,6 +2020,7 @@ def train_all_model_families(
     return {
         "model_bundles": bundles,
         "regression_evaluation": _safe_concat(regression_frames),
+        "uncertainty_validation": _safe_concat(uncertainty_frames),
         "classification_evaluation": pd.DataFrame(classification_rows),
         "classification_calibration": _safe_concat(calibration_frames),
         "hyperparameter_tuning": _safe_concat(tuning_frames),
