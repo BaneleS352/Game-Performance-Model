@@ -27,6 +27,72 @@ models, reports, and generated dashboard data. A fresh clone starts with a blank
 dashboard; upload your own workbook and run the production model to create local
 outputs.
 
+## Quick start from a fresh clone
+
+Prerequisites:
+
+- Python 3.11 or newer
+- Node.js 20 or newer
+- `pnpm`
+
+```bash
+git clone <repo-url>
+cd Game-Performance-Model
+```
+
+Windows PowerShell:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python -m pip install --upgrade pip
+.\.venv\Scripts\python -m pip install -e ".[dev]"
+
+cd dashboard
+pnpm install
+pnpm dev
+```
+
+macOS/Linux:
+
+```bash
+python -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -e ".[dev]"
+
+cd dashboard
+pnpm install
+pnpm dev
+```
+
+Open `http://127.0.0.1:5173`, upload your workbook, choose a worksheet, and run
+the production model. The dev server also starts the local Python API used for
+uploads and scoring.
+
+Activate the virtual environment first if you prefer using plain `python`:
+
+```bash
+source .venv/bin/activate
+```
+
+In Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+If the browser shows proxy errors for `/api/dashboard-data` or `/api/uploads`,
+the Python API did not start. Install the Python dependencies with the matching
+`.venv` command above, then restart `pnpm dev` from `dashboard/`.
+
+To build a static dashboard after data has been generated:
+
+```bash
+cd dashboard
+pnpm build
+```
+
+Then open `artifacts/dashboard/index.html`.
+
 ## Dashboard
 
 The dashboard is a React/Vite static app that reads the exported workbook data
