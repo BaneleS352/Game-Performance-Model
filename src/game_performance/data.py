@@ -6,15 +6,15 @@ import numpy as np
 import pandas as pd
 
 
-REQUIRED_COLUMNS = {
+REQUIRED_COLUMNS = (
     "Date",
     "SystemName",
     "TournamentName",
     "Clients",
-    "Betcount",
+    "BetCount",
     "Stakes",
     "GGR",
-}
+)
 
 
 def _clean_numeric_text(series: pd.Series, *, percent: bool = False) -> pd.Series:
@@ -61,10 +61,28 @@ def load_raw_workbook(path: str | Path, sheet_name: int | str = 0) -> pd.DataFra
 
 def validate_schema(df: pd.DataFrame) -> None:
     """Validate that the required source columns are present."""
-    missing = REQUIRED_COLUMNS.difference(df.columns)
+    source_columns: dict[str, list[object]] = {}
+    for column in df.columns:
+        source_columns.setdefault(str(column).casefold(), []).append(column)
+
+    missing = [column for column in REQUIRED_COLUMNS if column.casefold() not in source_columns]
 
     if missing:
-        raise ValueError(f"Missing required source columns: {sorted(missing)}")
+        raise ValueError(f"Missing required source columns: {missing}")
+
+    duplicates = [
+        column for column in REQUIRED_COLUMNS
+        if len(source_columns[column.casefold()]) > 1
+    ]
+    if duplicates:
+        raise ValueError(f"Duplicate required source columns: {duplicates}")
+
+
+def _canonicalize_required_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Match required upload headers case-insensitively and use canonical names."""
+    validate_schema(df)
+    source_columns = {str(column).casefold(): column for column in df.columns}
+    return df.rename(columns={source_columns[column.casefold()]: column for column in REQUIRED_COLUMNS})
 
 
 def clean_game_daily(
@@ -83,12 +101,10 @@ def clean_game_daily(
 
         "raise" raises a ValueError instead.
     """
-    validate_schema(df)
-
     if invalid_identifier_policy not in {"drop", "raise"}:
         raise ValueError("invalid_identifier_policy must be 'drop' or 'raise'.")
 
-    result = df.copy()
+    result = _canonicalize_required_columns(df.copy())
 
     # Dates
     result["Date"] = pd.to_datetime(
@@ -100,7 +116,7 @@ def clean_game_daily(
     result.attrs["invalid_date_rows"] = invalid_dates
 
     # Numeric fields
-    for column in ("Clients", "Betcount", "Stakes", "GGR"):
+    for column in ("Clients", "BetCount", "Stakes", "GGR"):
         if column in result.columns:
             result[column] = _clean_numeric_text(result[column])
 

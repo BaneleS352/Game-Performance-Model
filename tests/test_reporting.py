@@ -1,15 +1,55 @@
 from pathlib import Path
 
 import pandas as pd
+import pytest
 from openpyxl import load_workbook
 
 from game_performance.reporting import (
     BUSINESS_REPORT_EXCLUDED_COLUMNS,
     build_calibration_report,
+    build_forecast_capability_report,
     build_holdout_comparison,
     export_business_report,
     export_excel,
 )
+
+
+def test_forecast_capability_reports_history_horizon_games_and_average_error():
+    comparison = build_holdout_comparison(
+        pd.DataFrame(
+            {
+                "Game_ID": ["A", "B"],
+                "First_Observed_Date": ["2026-01-01", "2026-01-02"],
+                "Obs_Window": [21, 21],
+                "Horizon": [7, 7],
+                "actual_clients": [100, 200],
+                "predicted_clients": [90, 210],
+                "predicted_clients_low": [80, 180],
+                "predicted_clients_high": [110, 220],
+                "actual_stakes": [1_000, 2_000],
+                "predicted_stakes": [900, 2_100],
+                "predicted_stakes_low": [800, 1_800],
+                "predicted_stakes_high": [1_100, 2_200],
+                "actual_betcount": [50, 100],
+                "predicted_betcount": [55, 90],
+                "predicted_betcount_low": [45, 80],
+                "predicted_betcount_high": [60, 110],
+                "actual_ggr": [10, 20],
+                "predicted_ggr": [8, 25],
+                "predicted_ggr_low": [5, 12],
+                "predicted_ggr_high": [12, 18],
+            }
+        )
+    )
+
+    report = build_forecast_capability_report(comparison)
+
+    assert report.loc[0, "History_Days"] == 21
+    assert report.loc[0, "Forecast_Days"] == 7
+    assert report.loc[0, "Games_Evaluated"] == 2
+    assert report.loc[0, "Average_Off_Percent"] == pytest.approx(11.6667, rel=1e-4)
+    assert report.loc[0, "Prediction_Range_Hit_Percent"] == 87.5
+    assert "11.7% average error" in report.loc[0, "Summary"]
 
 
 def test_holdout_comparison_uses_next_seven_day_probability_and_off_flags():
@@ -148,6 +188,7 @@ def test_export_excel_keeps_all_regression_metrics_and_calibration_sheets():
         workbook = load_workbook(path, read_only=True)
 
         assert workbook.sheetnames == [
+            "Forecast Capability",
             "Holdout Comparison",
             "High Performers",
             "Forecasts",
@@ -230,7 +271,7 @@ def test_business_report_has_only_concise_sheets_and_excludes_technical_columns(
         export_business_report(path, comparison=comparison, forecasts=forecasts)
         workbook = load_workbook(path, read_only=True)
 
-        assert workbook.sheetnames == ["Holdout Comparison", "High Performers", "Forecasting"]
+        assert workbook.sheetnames == ["Forecast Capability", "Holdout Comparison", "High Performers", "Forecasting"]
         for sheet_name in workbook.sheetnames:
             headers = set(next(workbook[sheet_name].iter_rows(values_only=True)))
             assert not headers.intersection(BUSINESS_REPORT_EXCLUDED_COLUMNS)

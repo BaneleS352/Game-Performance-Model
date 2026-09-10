@@ -231,7 +231,7 @@ def test_daily_scoring_emits_all_eligible_checkpoint_families():
         "SystemName": ["SYS"] * 28,
         "TournamentName": ["Game"] * 28,
         "Clients": [10] * 28,
-        "Betcount": [20] * 28,
+        "BetCount": [20] * 28,
         "Stakes": [100] * 28,
         "GGR": [10] * 28,
     })

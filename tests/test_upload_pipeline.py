@@ -13,7 +13,7 @@ def _raw_workbook(path: Path, *, sheet_name: str = "Score me") -> None:
             "SystemName": ["SYS"] * 21,
             "TournamentName": ["Game"] * 21,
             "Clients": [10] * 21,
-            "Betcount": [1000] * 21,
+            "BetCount": [1000] * 21,
             "Stakes": [100] * 21,
             "GGR": [20] * 21,
         }

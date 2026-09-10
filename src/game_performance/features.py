@@ -231,8 +231,8 @@ def build_lifecycle_snapshot(
         obs["_window_day"] = obs["Days_Since_First_Observed"] - observation_start_age + 1
 
         aggregations = {"Clients": "sum", "Stakes": "sum", "GGR": "sum"}
-        if "Betcount" in obs.columns:
-            aggregations["Betcount"] = "sum"
+        if "BetCount" in obs.columns:
+            aggregations["BetCount"] = "sum"
 
         daily_obs = (
             obs.groupby("Date", as_index=False)
@@ -266,7 +266,7 @@ def build_lifecycle_snapshot(
             non_missing = obs[column].dropna()
             row[column] = non_missing.iloc[0] if not non_missing.empty else "Unknown"
 
-        for source, prefix in (("Clients", "clients"), ("Stakes", "stakes"), ("Betcount", "betcount"), ("GGR", "ggr")):
+        for source, prefix in (("Clients", "clients"), ("Stakes", "stakes"), ("BetCount", "betcount"), ("GGR", "ggr")):
             if source not in daily_obs.columns:
                 continue
             series = daily_obs[source]
@@ -300,9 +300,9 @@ def build_lifecycle_snapshot(
         stakes_week_1 = week_1_obs["Stakes"].sum(min_count=1)
         stakes_week_2 = week_2_obs["Stakes"].sum(min_count=1)
         stakes_week_3 = week_3_obs["Stakes"].sum(min_count=1)
-        betcount_week_1 = week_1_obs["Betcount"].sum(min_count=1) if "Betcount" in week_1_obs else np.nan
-        betcount_week_2 = week_2_obs["Betcount"].sum(min_count=1) if "Betcount" in week_2_obs else np.nan
-        betcount_week_3 = week_3_obs["Betcount"].sum(min_count=1) if "Betcount" in week_3_obs else np.nan
+        betcount_week_1 = week_1_obs["BetCount"].sum(min_count=1) if "BetCount" in week_1_obs else np.nan
+        betcount_week_2 = week_2_obs["BetCount"].sum(min_count=1) if "BetCount" in week_2_obs else np.nan
+        betcount_week_3 = week_3_obs["BetCount"].sum(min_count=1) if "BetCount" in week_3_obs else np.nan
         ggr_week_1 = week_1_obs["GGR"].sum(min_count=1)
         ggr_week_2 = week_2_obs["GGR"].sum(min_count=1)
         ggr_week_3 = week_3_obs["GGR"].sum(min_count=1)
@@ -387,7 +387,7 @@ def build_lifecycle_snapshot(
             week_2 = game[game["Days_Since_First_Observed"].between(observation_end_age + 8, observation_end_age + 14)].copy()
             row["target_clients"] = future["Clients"].sum(min_count=1)
             row["target_stakes"] = future["Stakes"].sum(min_count=1)
-            row["target_betcount"] = future["Betcount"].sum(min_count=1)
+            row["target_betcount"] = future["BetCount"].sum(min_count=1)
             row["target_ggr"] = future["GGR"].sum(min_count=1)
             row["target_bets_per_client"] = _safe_divide(
                 row["target_betcount"], row["target_clients"]

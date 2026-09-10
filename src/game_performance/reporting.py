@@ -9,6 +9,32 @@ from .features import FORECAST_HORIZON_DAYS, OBSERVATION_WINDOW_DAYS
 from .validation import create_high_performance_target, split_development_and_holdout
 
 
+FORECAST_CAPABILITY_COLUMNS = [
+    "History_Days",
+    "Forecast_Days",
+    "Games_Evaluated",
+    "Input_Metrics",
+    "Derived_Variables",
+    "Clients_Average_Off_Percent",
+    "Stakes_Average_Off_Percent",
+    "BetCount_Average_Off_Percent",
+    "GGR_Average_Off_Percent",
+    "Average_Off_Percent",
+    "Prediction_Range_Hit_Percent",
+    "Summary",
+]
+FORECAST_METRICS = {
+    "clients": "Clients",
+    "stakes": "Stakes",
+    "betcount": "BetCount",
+    "ggr": "GGR",
+}
+DERIVED_VARIABLES = (
+    "totals, averages, variability, first/last values, trends, growth, recent 3/7-day averages, "
+    "recent shares/ratios, peaks, weekly changes, per-client/per-bet ratios and GGR margin"
+)
+
+
 def _period_columns(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy()
     first = pd.to_datetime(result["First_Observed_Date"], errors="coerce")
@@ -235,6 +261,84 @@ def build_holdout_comparison(
     ]
 
     return test[ordered_columns + remaining_columns]
+
+
+def build_forecast_capability_report(comparison: pd.DataFrame) -> pd.DataFrame:
+    """Summarise X history days -> Y forecast days -> Z games -> W average error."""
+    if comparison.empty or not {"Obs_Window", "Horizon"}.issubset(comparison.columns):
+        return pd.DataFrame(columns=FORECAST_CAPABILITY_COLUMNS)
+
+    frame = comparison.copy()
+    frame["Obs_Window"] = pd.to_numeric(frame["Obs_Window"], errors="coerce")
+    frame["Horizon"] = pd.to_numeric(frame["Horizon"], errors="coerce")
+    frame = frame.dropna(subset=["Obs_Window", "Horizon"])
+    rows = []
+
+    for (history_days, forecast_days), group in frame.groupby(["Obs_Window", "Horizon"], sort=True):
+        average_off: dict[str, float] = {}
+        range_hits: list[float] = []
+
+        for metric in FORECAST_METRICS:
+            actual_column = f"actual_{metric}"
+            predicted_column = f"predicted_{metric}"
+            if actual_column not in group or predicted_column not in group:
+                average_off[metric] = np.nan
+                continue
+            actual = pd.to_numeric(group[actual_column], errors="coerce")
+            predicted = pd.to_numeric(group[predicted_column], errors="coerce")
+
+            valid = actual.notna() & predicted.notna()
+            denominator = actual.loc[valid].abs().sum()
+            average_off[metric] = (
+                float((predicted.loc[valid] - actual.loc[valid]).abs().sum() / denominator)
+                if valid.any() and denominator
+                else np.nan
+            )
+
+            low_column = f"predicted_{metric}_low"
+            high_column = f"predicted_{metric}_high"
+            if low_column in group and high_column in group:
+                low = pd.to_numeric(group[low_column], errors="coerce")
+                high = pd.to_numeric(group[high_column], errors="coerce")
+                range_valid = actual.notna() & low.notna() & high.notna()
+                range_hits.extend(actual.loc[range_valid].between(low.loc[range_valid], high.loc[range_valid]).astype(float))
+
+        measured = [value for value in average_off.values() if pd.notna(value)]
+        mean_off = float(np.mean(measured)) if measured else np.nan
+        range_coverage = float(np.mean(range_hits)) if range_hits else np.nan
+        games = int(group["Game_ID"].nunique()) if "Game_ID" in group else int(len(group))
+        history_days = int(history_days)
+        forecast_days = int(forecast_days)
+        error_text = f"{mean_off:.1%}" if pd.notna(mean_off) else "unavailable"
+        coverage_text = (
+            f"; {range_coverage:.1%} of actual metric values fell inside the prediction ranges"
+            if pd.notna(range_coverage)
+            else ""
+        )
+
+        rows.append(
+            {
+                "History_Days": history_days,
+                "Forecast_Days": forecast_days,
+                "Games_Evaluated": games,
+                "Input_Metrics": ", ".join(FORECAST_METRICS.values()),
+                "Derived_Variables": DERIVED_VARIABLES,
+                **{
+                    f"{label}_Average_Off_Percent": value * 100 if pd.notna(value) else np.nan
+                    for metric, label in FORECAST_METRICS.items()
+                    for value in [average_off[metric]]
+                },
+                "Average_Off_Percent": mean_off * 100 if pd.notna(mean_off) else np.nan,
+                "Prediction_Range_Hit_Percent": range_coverage * 100 if pd.notna(range_coverage) else np.nan,
+                "Summary": (
+                    f"Using {history_days} days of daily Clients, Stakes, BetCount and GGR history, "
+                    f"the model forecasts the next {forecast_days} days for {games} holdout games "
+                    f"with {error_text} average error (WAPE){coverage_text}."
+                ),
+            }
+        )
+
+    return pd.DataFrame(rows, columns=FORECAST_CAPABILITY_COLUMNS)
 
 
 def build_calibration_report(comparison: pd.DataFrame, *, bins: int = 10) -> pd.DataFrame:
@@ -491,6 +595,7 @@ def export_business_report(
     return _write_excel(
         Path(path),
         [
+            ("Forecast Capability", build_forecast_capability_report(comparison)),
             ("Holdout Comparison", _business_report_view(comparison)),
             ("High Performers", _business_report_view(_high_performers(forecasts))),
             ("Forecasting", _business_report_view(_forecast_export_columns(forecasts))),
@@ -514,6 +619,7 @@ def export_excel(
     calibration = build_calibration_report(comparison) if calibration is None else calibration
 
     sheets = [
+        ("Forecast Capability", build_forecast_capability_report(comparison)),
         ("Holdout Comparison", comparison),
         ("High Performers", _high_performers(comparison)),
         ("Forecasts", _forecast_export_columns(forecasts)),

@@ -10,7 +10,7 @@ def _daily_data(periods=28, **metrics):
         "SystemName": ["SYS"] * periods,
         "TournamentName": ["Game"] * periods,
         "Clients": metrics.get("Clients", [1] * periods),
-        "Betcount": metrics.get("Betcount", [2] * periods),
+        "BetCount": metrics.get("BetCount", [2] * periods),
         "Stakes": metrics.get("Stakes", [10] * periods),
         "GGR": metrics.get("GGR", [1] * periods),
     }))
@@ -18,7 +18,7 @@ def _daily_data(periods=28, **metrics):
 
 def test_live_snapshot_contains_no_future_targets():
     snapshot = build_lifecycle_snapshot(
-        _daily_data(7, Clients=range(1, 8), Betcount=range(20, 27), Stakes=range(10, 17), GGR=range(2, 9)),
+        _daily_data(7, Clients=range(1, 8), BetCount=range(20, 27), Stakes=range(10, 17), GGR=range(2, 9)),
         7,
         7,
         require_future=False,
@@ -34,7 +34,7 @@ def test_live_snapshot_contains_no_future_targets():
 
 def test_historical_snapshot_targets_all_regression_metrics():
     snapshot = build_lifecycle_snapshot(
-        _daily_data(14, Clients=range(1, 15), Betcount=range(20, 34), Stakes=range(10, 24), GGR=range(2, 16)),
+        _daily_data(14, Clients=range(1, 15), BetCount=range(20, 34), Stakes=range(10, 24), GGR=range(2, 16)),
         7,
         7,
     )
@@ -62,7 +62,7 @@ def test_snapshot_targets_the_next_seven_days():
 
 def test_snapshot_adds_commercial_driver_targets_and_margin_features():
     snapshot = build_lifecycle_snapshot(
-        _daily_data(14, Clients=[2] * 14, Betcount=[6] * 14, Stakes=[30] * 14, GGR=[-3] * 14),
+        _daily_data(14, Clients=[2] * 14, BetCount=[6] * 14, Stakes=[30] * 14, GGR=[-3] * 14),
         7,
         7,
     )
@@ -76,7 +76,7 @@ def test_snapshot_adds_commercial_driver_targets_and_margin_features():
 
 def test_commercial_driver_targets_are_missing_when_future_denominators_are_zero():
     snapshot = build_lifecycle_snapshot(
-        _daily_data(14, Clients=([2] * 7) + ([0] * 7), Betcount=([6] * 7) + ([0] * 7), Stakes=([30] * 7) + ([0] * 7)),
+        _daily_data(14, Clients=([2] * 7) + ([0] * 7), BetCount=([6] * 7) + ([0] * 7), Stakes=([30] * 7) + ([0] * 7)),
         7,
         7,
     )
@@ -104,7 +104,7 @@ def test_weekly_features_reach_model_features():
         _daily_data(
             Clients=([10] * 7) + ([20] * 7) + ([20] * 14),
             Stakes=([100] * 7) + ([400] * 7) + ([300] * 14),
-            Betcount=([20] * 7) + ([40] * 7) + ([30] * 7) + ([25] * 7),
+            BetCount=([20] * 7) + ([40] * 7) + ([30] * 7) + ([25] * 7),
             GGR=([10] * 7) + ([40] * 7) + ([30] * 14),
         ),
         21,

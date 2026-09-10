@@ -5,6 +5,7 @@ import "./styles.css";
 const fallbackData = window.DASHBOARD_DATA;
 
 const fallbackWorkbookSheets = [
+  "Forecast Capability",
   "Holdout Comparison",
   "High Performers",
   "Forecasts",
@@ -26,7 +27,7 @@ const money = new Intl.NumberFormat("en-ZA", {
 });
 const whole = new Intl.NumberFormat("en-ZA", { maximumFractionDigits: 0 });
 const pct = new Intl.NumberFormat("en-ZA", { style: "percent", maximumFractionDigits: 0 });
-const requiredUploadHeaders = ["Date", "SystemName", "TournamentName", "Clients", "Betcount", "Stakes", "GGR"];
+const requiredUploadHeaders = ["Date", "SystemName", "TournamentName", "Clients", "BetCount", "Stakes", "GGR"];
 const ledgerRowHeight = 44;
 const ledgerOverscan = 10;
 const ledgerWindowSize = 34;

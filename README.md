@@ -50,9 +50,9 @@ pnpm install
 pnpm dev
 ```
 
-Open `http://127.0.0.1:5173`, choose a CSV or Excel file (`.csv`, `.xls`, `.xlsx`, `.xlsb`, or `.xlsm`) and worksheet, then run the full production model. The selected sheet must include `Date`, `SystemName`, `TournamentName`, `Clients`, `Betcount`, `Stakes`, and `GGR` columns. The upload runs the same four notebook stages through the reusable `game_performance` modules: data cleaning, lifecycle feature engineering, full regression and classification training, then forecasting, reporting, and dashboard publishing. Each upload and generated report is kept under `data/uploads/` and `artifacts/uploads/`; the latest successful run also publishes the processed data, features, model artifact, and dashboard.
+Open `http://127.0.0.1:5173`, choose a CSV or Excel file (`.csv`, `.xls`, `.xlsx`, `.xlsb`, or `.xlsm`) and worksheet, then run the full production model. The selected sheet must include `Date`, `SystemName`, `TournamentName`, `Clients`, `BetCount`, `Stakes`, and `GGR` columns; casing is accepted case-insensitively. The upload runs the same four notebook stages through the reusable `game_performance` modules: data cleaning, lifecycle feature engineering, full regression and classification training, then forecasting, reporting, and dashboard publishing. Each upload and generated report is kept under `data/uploads/` and `artifacts/uploads/`; the latest successful run also publishes the processed data, features, model artifact, and dashboard.
 
-Each run provides two downloads: `Business Report.xlsx` with concise holdout, high-performer, and forecasting sheets; and `Model Analysis.xlsx` with the complete model outputs.
+Each run provides two downloads: `Business Report.xlsx` with a forecast-capability summary, concise holdout results, high performers, and forecasts; and `Model Analysis.xlsx` with the complete model outputs. The `Forecast Capability` sheet states how many daily history days were used, the derived variable families, the forecast period, the number of holdout games evaluated, WAPE for Clients, Stakes, BetCount, and GGR, their average percentage error, and prediction-range coverage.
 
 Uploaded data is split chronologically by unique launch date: 70% for training,
 15% for validation, and 15% for holdout scoring. For example, 60 dates produce
