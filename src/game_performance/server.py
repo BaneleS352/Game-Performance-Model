@@ -16,7 +16,7 @@ from .config import Settings
 from .upload_pipeline import run_full_production_pipeline, save_uploaded_workbook, workbook_sheets
 
 
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+MAX_UPLOAD_BYTES = 65 * 1024 * 1024
 RUN_REPORT_PATH = re.compile(r"^/runs/([A-Za-z0-9_]+)/(business-report|model-analysis)\.xlsx$")
 RUN_UPLOAD_PATH = re.compile(r"^/api/uploads/([A-Za-z0-9_]+)/run$")
 
@@ -52,7 +52,7 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         if length < 1:
             raise ValueError("The request body is empty.")
         if length > MAX_UPLOAD_BYTES:
-            raise ValueError("The workbook must be 50 MB or smaller.")
+            raise ValueError("The workbook must be 65 MB or smaller.")
         return self.rfile.read(length)
 
     def _serve_report(self, run_id: str, report: str) -> None:

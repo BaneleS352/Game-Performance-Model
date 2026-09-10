@@ -19,8 +19,13 @@ src/game_performance/
   scoring.py      # current-game scoring and recommendations
   reporting.py    # holdout comparison, KPIs, Excel export
   io.py           # explicit artifact persistence
- tests/
+  tests/
 ```
+
+This repository intentionally excludes source workbooks, uploaded data, trained
+models, reports, and generated dashboard data. A fresh clone starts with a blank
+dashboard; upload your own workbook and run the production model to create local
+outputs.
 
 ## Dashboard
 
@@ -37,7 +42,7 @@ pnpm build
 Open `artifacts/dashboard/index.html` after building. The dashboard shows
 curated Top Stakes and Top Clients ledger views with focused forecast ranges.
 
-The raw workbook is not included in this refactor, so full model training was not executed here. Static compilation and unit tests validate the refactored code paths that do not require the private source workbook.
+The private source workbook and generated outputs are not included in the repository. Static compilation and unit tests validate the refactored code paths; each user must train a model from their own uploaded data.
 
 ### Score an uploaded workbook locally
 

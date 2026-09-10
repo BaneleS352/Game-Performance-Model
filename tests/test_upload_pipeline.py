@@ -1,8 +1,11 @@
 from pathlib import Path
+from io import BytesIO
+from email.message import Message
 
 import pandas as pd
 import pytest
 
+from game_performance.server import DashboardRequestHandler, MAX_UPLOAD_BYTES
 from game_performance import upload_pipeline
 
 
@@ -53,6 +56,19 @@ def test_save_uploaded_workbook_rejects_unsupported_files_and_sanitizes_name(tmp
     assert upload_id in saved.name
     assert saved.name.endswith("Quarterly_scores.xlsx")
     assert saved.parent == tmp_path / "data" / "uploads"
+
+
+def test_upload_request_allows_65_mb_and_rejects_larger():
+    handler = object.__new__(DashboardRequestHandler)
+    handler.headers = Message()
+    handler.headers["Content-Length"] = str(MAX_UPLOAD_BYTES)
+    handler.rfile = BytesIO(b"x" * 16)
+
+    assert handler._read_body() == b"x" * 16
+
+    handler.headers["Content-Length"] = str(MAX_UPLOAD_BYTES + 1)
+    with pytest.raises(ValueError, match="65 MB"):
+        handler._read_body()
 
 
 def test_score_uploaded_workbook_uses_selected_sheet(tmp_path, monkeypatch):

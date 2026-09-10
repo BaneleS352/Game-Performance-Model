@@ -4,6 +4,13 @@ __pycache__/
 .venv/
 node_modules/
 .pnpm-store/
-artifacts/**/*.pkl
-artifacts/**/*.joblib
+
+# Local/private input data and generated model outputs.
+data/raw/*
+data/uploads/*
+artifacts/*
+
+# Keep directory placeholders if they are added later.
 !data/raw/.gitkeep
+!data/uploads/.gitkeep
+!artifacts/.gitkeep
