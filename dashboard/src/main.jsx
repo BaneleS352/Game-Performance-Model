@@ -138,6 +138,7 @@ function combinedPerformanceScore(row, maxClients, maxStakes) {
 
 function Dashboard() {
   const [data, setData] = useState(fallbackData);
+  const [reportUrls, setReportUrls] = useState(null);
 
   useEffect(() => {
     let active = true;
@@ -150,10 +151,10 @@ function Dashboard() {
     return () => { active = false; };
   }, []);
 
-  return <DashboardView data={data} onDashboardData={setData} />;
+  return <DashboardView data={data} onDashboardData={setData} reportUrls={reportUrls} onReportUrlsChange={setReportUrls} />;
 }
 
-function DashboardView({ data, onDashboardData }) {
+function DashboardView({ data, onDashboardData, reportUrls, onReportUrlsChange }) {
   if (!data) {
     return (
       <main className="arcade-shell">
@@ -167,7 +168,7 @@ function DashboardView({ data, onDashboardData }) {
           <h2>Dashboard data is missing</h2>
           <p>Upload and score a workbook to create the first dashboard view.</p>
         </section>
-        <UploadPanel onDashboardData={onDashboardData} />
+        <UploadPanel onDashboardData={onDashboardData} reportUrls={reportUrls} onReportUrlsChange={onReportUrlsChange} />
       </main>
     );
   }
@@ -287,7 +288,7 @@ function DashboardView({ data, onDashboardData }) {
       <WorkbookSheetTabs activeSheetName={activeSheetName} onOpenSheet={openSheet} workbookSheets={workbookSheets} />
 
       {isUploadPage ? (
-        <UploadPage onDashboardData={onDashboardData} />
+        <UploadPage onDashboardData={onDashboardData} reportUrls={reportUrls} onReportUrlsChange={onReportUrlsChange} />
       ) : activeSheet ? (
         <SheetPage sheet={activeSheet} />
       ) : (
@@ -456,13 +457,12 @@ async function readJson(response) {
   return payload;
 }
 
-function UploadPanel({ onDashboardData }) {
+function UploadPanel({ onDashboardData, reportUrls, onReportUrlsChange }) {
   const [upload, setUpload] = useState(null);
   const [sheets, setSheets] = useState([]);
   const [sheetName, setSheetName] = useState("");
   const [status, setStatus] = useState("idle");
   const [message, setMessage] = useState("");
-  const [reportUrls, setReportUrls] = useState(null);
 
   async function chooseWorkbook(event) {
     const file = event.target.files?.[0];
@@ -471,7 +471,7 @@ function UploadPanel({ onDashboardData }) {
     setSheets([]);
     setSheetName("");
     setMessage("");
-    setReportUrls(null);
+    onReportUrlsChange(null);
     setStatus("uploading");
     try {
       const payload = await readJson(await fetch("/api/uploads", {
@@ -494,7 +494,7 @@ function UploadPanel({ onDashboardData }) {
     if (!upload || !sheetName) return;
     setStatus("running");
     setMessage("Running the complete production model. This may take several minutes...");
-    setReportUrls(null);
+    onReportUrlsChange(null);
     try {
       const result = await readJson(await fetch(`/api/uploads/${upload.id}/run`, {
         method: "POST",
@@ -505,7 +505,7 @@ function UploadPanel({ onDashboardData }) {
       onDashboardData(dashboardData);
       setStatus("success");
       setMessage(`${whole.format(result.summary.games_scored)} games scored from ${upload.name}.`);
-      setReportUrls({ business: result.business_report_url, analysis: result.model_analysis_url });
+      onReportUrlsChange({ business: result.business_report_url, analysis: result.model_analysis_url });
     } catch (error) {
       setStatus("error");
       setMessage(error.message);
@@ -548,9 +548,9 @@ function UploadPanel({ onDashboardData }) {
             <span />
           </div>
         )}
-        {message && (
+        {(message || reportUrls) && (
           <p className={`upload-status ${status}`} role={status === "error" ? "alert" : "status"} aria-live="polite">
-            {message} {reportUrls && (
+            {message || "Reports are ready to download."} {reportUrls && (
               <span className="report-downloads">
                 <a href={reportUrls.business}>Download Business Report</a>
                 <a href={reportUrls.analysis}>Download Model Analysis</a>
@@ -587,7 +587,7 @@ function WorkbookSheetTabs({ workbookSheets, activeSheetName, onOpenSheet }) {
   );
 }
 
-function UploadPage({ onDashboardData }) {
+function UploadPage({ onDashboardData, reportUrls, onReportUrlsChange }) {
   return (
     <section className="sheet-page quest-card upload-page" aria-label="New workbook">
       <div className="sheet-page-heading">
@@ -597,7 +597,7 @@ function UploadPage({ onDashboardData }) {
           <p>Upload a workbook, choose a worksheet, and run the complete production model.</p>
         </div>
       </div>
-      <UploadPanel onDashboardData={onDashboardData} />
+      <UploadPanel onDashboardData={onDashboardData} reportUrls={reportUrls} onReportUrlsChange={onReportUrlsChange} />
     </section>
   );
 }
