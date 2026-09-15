@@ -18,6 +18,7 @@ from .dashboard import export_dashboard
 from .data import clean_game_daily, load_raw_workbook
 from .features import build_all_historical_snapshots
 from .io import load_artifact, save_artifact, save_dataframe
+from .impact import add_external_impact_flags, detect_external_impact_periods
 from .modeling import train_all_model_families
 from .reporting import build_holdout_comparison, export_business_report, export_excel
 from .scoring import run_daily_lifecycle_scoring
@@ -138,6 +139,8 @@ def run_full_production_pipeline(
     cleaned = clean_game_daily(load_raw_workbook(workbook_path, sheet_name=sheet_name))
     if cleaned.empty:
         raise ValueError("The selected worksheet has no valid rows to score.")
+    cleaning_summary = dict(cleaned.attrs)
+    impact_periods = detect_external_impact_periods(cleaned)
     uploaded_data_days = int(cleaned["Date"].dropna().nunique())
     cleaned_path = save_dataframe(cleaned, run_dir / "clean_game_daily.pkl")
 
@@ -191,6 +194,7 @@ def run_full_production_pipeline(
         as_of_date=cleaned["Date"].max(),
         exact_checkpoint_only=False,
     )
+    forecasts = add_external_impact_flags(forecasts, impact_periods)
     if forecasts.empty:
         minimum_checkpoint = min(checkpoint for checkpoint, _ in model_bundles)
         raise ValueError(
@@ -223,6 +227,7 @@ def run_full_production_pipeline(
         business_report_path,
         comparison=comparison,
         forecasts=forecasts,
+        impact_periods=impact_periods,
     )
     export_excel(
         model_analysis_path,
@@ -233,6 +238,7 @@ def run_full_production_pipeline(
         calibration=training_results.get("classification_calibration"),
         configuration_leaderboard=training_results.get("configuration_leaderboard"),
         uncertainty_validation=training_results.get("uncertainty_validation"),
+        impact_periods=impact_periods,
     )
     staged_dashboard = run_dir / "dashboard"
     staged_data_path = export_dashboard(model_analysis_path, staged_dashboard)
@@ -254,6 +260,7 @@ def run_full_production_pipeline(
         "dashboard_data_path": str(dashboard_path),
         "model_path": str(root / "artifacts" / "models" / "training_results.joblib"),
         "summary": dashboard_data["summary"],
+        "cleaning_summary": cleaning_summary,
         "training_metadata": training_results.get("training_metadata", {}),
     }
 
@@ -274,6 +281,8 @@ def score_uploaded_workbook(
     cleaned = clean_game_daily(load_raw_workbook(workbook_path, sheet_name=sheet_name))
     if cleaned.empty:
         raise ValueError("The selected worksheet has no valid rows to score.")
+    cleaning_summary = dict(cleaned.attrs)
+    impact_periods = detect_external_impact_periods(cleaned)
 
     model_path = Path(model_path or root / "artifacts" / "models" / "training_results.joblib")
     if not model_path.exists():
@@ -290,6 +299,7 @@ def score_uploaded_workbook(
         as_of_date=cleaned["Date"].max(),
         exact_checkpoint_only=False,
     )
+    forecasts = add_external_impact_flags(forecasts, impact_periods)
     if forecasts.empty:
         minimum_checkpoint = min(strategy)
         raise ValueError(
@@ -315,6 +325,7 @@ def score_uploaded_workbook(
         business_report_path,
         comparison=comparison,
         forecasts=forecasts,
+        impact_periods=impact_periods,
     )
     export_excel(
         model_analysis_path,
@@ -324,6 +335,7 @@ def score_uploaded_workbook(
         classification=results.get("classification_evaluation", pd.DataFrame()),
         calibration=results.get("classification_calibration", pd.DataFrame()),
         configuration_leaderboard=results.get("configuration_leaderboard"),
+        impact_periods=impact_periods,
     )
 
     staged_dashboard = run_dir / "dashboard"
@@ -339,4 +351,5 @@ def score_uploaded_workbook(
         "model_analysis_path": str(model_analysis_path),
         "dashboard_data_path": str(dashboard_path),
         "summary": dashboard_data["summary"],
+        "cleaning_summary": cleaning_summary,
     }

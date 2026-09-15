@@ -106,14 +106,15 @@ def clean_game_daily(
 
     result = _canonicalize_required_columns(df.copy())
 
+    input_rows = len(result)
+
     # Dates
     result["Date"] = pd.to_datetime(
         result["Date"],
         errors="coerce",
     )
 
-    invalid_dates = int(result["Date"].isna().sum())
-    result.attrs["invalid_date_rows"] = invalid_dates
+    invalid_dates = result["Date"].isna()
 
     # Numeric fields
     for column in ("Clients", "BetCount", "Stakes", "GGR"):
@@ -137,26 +138,46 @@ def clean_game_daily(
         | tournament.eq("")
     )
 
-    invalid_count = int(invalid_identifier.sum())
+    invalid_identifier_count = int(invalid_identifier.sum())
 
-    if invalid_count > 0:
+    if invalid_identifier_count > 0:
         if invalid_identifier_policy == "raise":
             raise ValueError(
                 "Cannot construct Game_ID for "
-                f"{invalid_count} rows with missing SystemName/TournamentName."
+                f"{invalid_identifier_count} rows with missing SystemName/TournamentName."
             )
 
-        # Exclude invalid lifecycle records from modelling data.
-        result = result.loc[~invalid_identifier].copy()
+    required_numeric = ("Clients", "BetCount", "Stakes", "GGR")
+    invalid_numeric = result[list(required_numeric)].isna().any(axis=1)
+    invalid_numeric |= ~np.isfinite(result[list(required_numeric)]).all(axis=1)
+    negative_activity = result[["Clients", "BetCount", "Stakes"]].lt(0).any(axis=1)
+    corrupted = invalid_dates | invalid_identifier | invalid_numeric | negative_activity
 
-        system = _clean_identifier(result["SystemName"])
-        tournament = _clean_identifier(result["TournamentName"])
+    # A daily game record must have one valid row per game and date. Keep the
+    # last valid source occurrence when an export repeats a daily record.
+    valid = result.loc[~corrupted].copy()
+    valid["SystemName"] = _clean_identifier(valid["SystemName"])
+    valid["TournamentName"] = _clean_identifier(valid["TournamentName"])
+    valid["Game_ID"] = valid["SystemName"] + "::" + valid["TournamentName"]
+    duplicate_mask = valid.duplicated(subset=["Date", "Game_ID"], keep="last")
+    duplicate_count = int(duplicate_mask.sum())
+    result = valid.loc[~duplicate_mask].copy().reset_index(drop=True)
+    system = result["SystemName"]
+    tournament = result["TournamentName"]
 
-    # Store an auditable count for the notebook/reporting layer.
-    result.attrs["excluded_invalid_identifier_rows"] = invalid_count
-
-    # Separator makes accidental concatenation collisions less likely than raw string joining.
-    result["Game_ID"] = system + "::" + tournament
+    # Store auditable counts for the notebook/reporting layer.
+    result.attrs.update(
+        {
+            "input_rows": int(input_rows),
+            "invalid_date_rows": int(invalid_dates.sum()),
+            "excluded_invalid_identifier_rows": invalid_identifier_count,
+            "invalid_numeric_rows": int(invalid_numeric.sum()),
+            "negative_activity_rows": int(negative_activity.sum()),
+            "corrupted_rows_removed": int(corrupted.sum()),
+            "duplicate_rows_removed": duplicate_count,
+            "output_rows": int(len(result)),
+        }
+    )
 
     # Lifecycle reference fields
     result["First_Observed_Date"] = (

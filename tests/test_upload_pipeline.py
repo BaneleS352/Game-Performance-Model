@@ -6,6 +6,8 @@ import pandas as pd
 import pytest
 
 from game_performance.server import DashboardRequestHandler, MAX_UPLOAD_BYTES
+from game_performance.server import UploadState
+import game_performance.server as server
 from game_performance import upload_pipeline
 
 
@@ -71,6 +73,24 @@ def test_upload_request_allows_65_mb_and_rejects_larger():
         handler._read_body()
 
 
+def test_background_job_finishes_without_request_connection(tmp_path, monkeypatch):
+    state = UploadState(tmp_path)
+    handler = object.__new__(DashboardRequestHandler)
+    handler.state = state
+    state.jobs["job-1"] = {"job_id": "job-1", "status": "queued"}
+
+    def run_pipeline(*args, progress_callback=None, **kwargs):
+        progress_callback(0.5, "Still running")
+        return {"run_id": "run-1"}
+
+    monkeypatch.setattr(server, "run_full_production_pipeline", run_pipeline)
+    handler._run_job("job-1", "upload-1", tmp_path / "source.xlsx", "Sheet1")
+
+    assert state.jobs["job-1"]["status"] == "completed"
+    assert state.jobs["job-1"]["progress"] == 1
+    assert state.jobs["job-1"]["result"]["business_report_url"] == "/runs/run-1/business-report.xlsx"
+
+
 def test_score_uploaded_workbook_uses_selected_sheet(tmp_path, monkeypatch):
     workbook = tmp_path / "source.xlsx"
     _raw_workbook(workbook, sheet_name="Selected")
@@ -107,6 +127,12 @@ def test_run_full_production_pipeline_runs_all_stages(tmp_path, monkeypatch):
     _raw_workbook(workbook)
     calls = []
 
+    original_detector = upload_pipeline.detect_external_impact_periods
+
+    def detect_impact(cleaned):
+        calls.append("impact")
+        return original_detector(cleaned)
+
     def build_features(cleaned, strategy):
         calls.append("features")
         return {(21, 7): cleaned.head(1)}
@@ -132,6 +158,7 @@ def test_run_full_production_pipeline_runs_all_stages(tmp_path, monkeypatch):
     monkeypatch.setattr(upload_pipeline, "build_all_historical_snapshots", build_features)
     monkeypatch.setattr(upload_pipeline, "train_all_model_families", train_production)
     monkeypatch.setattr(upload_pipeline, "run_daily_lifecycle_scoring", score_production)
+    monkeypatch.setattr(upload_pipeline, "detect_external_impact_periods", detect_impact)
 
     progress = []
     result = upload_pipeline.run_full_production_pipeline(
@@ -141,7 +168,7 @@ def test_run_full_production_pipeline_runs_all_stages(tmp_path, monkeypatch):
         progress_callback=lambda fraction, message: progress.append((fraction, message)),
     )
 
-    assert calls == ["features", "training", "scoring"]
+    assert calls == ["impact", "features", "training", "scoring"]
     assert [fraction for fraction, _ in progress] == [0.05, 0.18, 0.28, 0.76, 0.94, 1.0]
     assert Path(result["model_path"]).is_file()
     assert Path(result["business_report_path"]).is_file()

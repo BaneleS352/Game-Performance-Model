@@ -6,7 +6,10 @@ import argparse
 import json
 import mimetypes
 import re
+import threading
+import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -19,12 +22,15 @@ from .upload_pipeline import run_full_production_pipeline, save_uploaded_workboo
 MAX_UPLOAD_BYTES = 65 * 1024 * 1024
 RUN_REPORT_PATH = re.compile(r"^/runs/([A-Za-z0-9_]+)/(business-report|model-analysis)\.xlsx$")
 RUN_UPLOAD_PATH = re.compile(r"^/api/uploads/([A-Za-z0-9_]+)/run$")
+RUN_STATUS_PATH = re.compile(r"^/api/runs/([A-Za-z0-9_]+)$")
 
 
 @dataclass
 class UploadState:
     project_root: Path
     uploads: dict[str, Path] = field(default_factory=dict)
+    jobs: dict[str, dict] = field(default_factory=dict)
+    jobs_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 class DashboardRequestHandler(SimpleHTTPRequestHandler):
@@ -49,10 +55,16 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
             pass
 
     def _read_body(self) -> bytes:
+        values = self.headers.get_all("Content-Length") or []
         try:
-            length = int(self.headers.get("Content-Length", ""))
+            lengths = [int(value) for value in values]
         except ValueError as error:
             raise ValueError("A valid Content-Length header is required.") from error
+        if any(length > MAX_UPLOAD_BYTES for length in lengths):
+            raise ValueError("The workbook must be 65 MB or smaller.")
+        if len(set(lengths)) > 1:
+            raise ValueError("Conflicting Content-Length headers are not allowed.")
+        length = lengths[-1] if lengths else 0
         if length < 1:
             raise ValueError("The request body is empty.")
         if length > MAX_UPLOAD_BYTES:
@@ -76,6 +88,11 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(path.read_bytes())
 
+    def _job_response(self, job_id: str) -> dict | None:
+        with self.state.jobs_lock:
+            job = self.state.jobs.get(job_id)
+            return dict(job) if job else None
+
     def do_GET(self) -> None:
         path = urlparse(self.path).path
         if path == "/api/dashboard-data":
@@ -88,6 +105,14 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         match = RUN_REPORT_PATH.match(path)
         if match:
             self._serve_report(match.group(1), match.group(2))
+            return
+        match = RUN_STATUS_PATH.match(path)
+        if match:
+            job = self._job_response(match.group(1))
+            if job is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "Run not found."})
+            else:
+                self._send_json(HTTPStatus.OK, job)
             return
         super().do_GET()
 
@@ -110,7 +135,11 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
 
             match = RUN_UPLOAD_PATH.match(path)
             if match:
-                workbook_path = self.state.uploads.get(match.group(1))
+                upload_id = match.group(1)
+                workbook_path = self.state.uploads.get(upload_id)
+                if workbook_path is None:
+                    candidates = (self.state.project_root / "data" / "uploads").glob(f"{upload_id}_*")
+                    workbook_path = next(candidates, None)
                 if workbook_path is None or not workbook_path.is_file():
                     self._send_json(HTTPStatus.NOT_FOUND, {"error": "Upload not found. Upload the workbook again."})
                     return
@@ -118,11 +147,25 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
                 sheet_name = payload.get("sheet_name")
                 if not isinstance(sheet_name, str) or not sheet_name:
                     raise ValueError("Choose a worksheet to score.")
-                result = run_full_production_pipeline(self.state.project_root, workbook_path, sheet_name)
-                result["upload_id"] = match.group(1)
-                result["business_report_url"] = f"/runs/{result['run_id']}/business-report.xlsx"
-                result["model_analysis_url"] = f"/runs/{result['run_id']}/model-analysis.xlsx"
-                self._send_json(HTTPStatus.OK, result)
+                job_id = f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}_{uuid.uuid4().hex[:8]}"
+                job = {
+                    "job_id": job_id,
+                    "status": "queued",
+                    "progress": 0,
+                    "message": "Run queued.",
+                    "upload_id": upload_id,
+                    "upload_name": workbook_path.name,
+                    "sheet_name": sheet_name,
+                }
+                with self.state.jobs_lock:
+                    self.state.jobs[job_id] = job
+
+                threading.Thread(
+                    target=self._run_job,
+                    args=(job_id, upload_id, workbook_path, sheet_name),
+                    daemon=True,
+                ).start()
+                self._send_json(HTTPStatus.ACCEPTED, job)
                 return
 
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Endpoint not found."})
@@ -133,6 +176,30 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
         except Exception as error:  # Keep the UI response useful while preserving the traceback in the server log.
             print(f"Upload scoring failed: {error}")
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Scoring failed. Check the server terminal for details."})
+
+    def _run_job(self, job_id: str, upload_id: str, workbook_path: Path, sheet_name: str) -> None:
+        def update(progress: float, message: str) -> None:
+            with self.state.jobs_lock:
+                job = self.state.jobs[job_id]
+                job.update(status="running", progress=progress, message=message)
+
+        try:
+            update(0, "Starting production model.")
+            result = run_full_production_pipeline(
+                self.state.project_root,
+                workbook_path,
+                sheet_name,
+                progress_callback=update,
+            )
+            result["upload_id"] = upload_id
+            result["business_report_url"] = f"/runs/{result['run_id']}/business-report.xlsx"
+            result["model_analysis_url"] = f"/runs/{result['run_id']}/model-analysis.xlsx"
+            with self.state.jobs_lock:
+                self.state.jobs[job_id].update(status="completed", progress=1, message="Production run complete.", result=result)
+        except Exception as error:
+            print(f"Upload scoring failed: {error}")
+            with self.state.jobs_lock:
+                self.state.jobs[job_id].update(status="failed", message=str(error), error=str(error))
 
 
 def create_server(host: str = "127.0.0.1", port: int = 8000) -> ThreadingHTTPServer:

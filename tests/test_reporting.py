@@ -193,6 +193,7 @@ def test_export_excel_keeps_all_regression_metrics_and_calibration_sheets():
             "High Performers",
             "Forecasts",
             "Model Accuracy",
+            "Promo Impact Periods",
             "Uncertainty Validation",
             "future_performance_score_calcul",
         ]
@@ -271,11 +272,59 @@ def test_business_report_has_only_concise_sheets_and_excludes_technical_columns(
         export_business_report(path, comparison=comparison, forecasts=forecasts)
         workbook = load_workbook(path, read_only=True)
 
-        assert workbook.sheetnames == ["Forecast Capability", "Holdout Comparison", "High Performers", "Forecasting"]
+        assert workbook.sheetnames == ["Forecast Capability", "Holdout Comparison", "High Performers", "Forecasting", "Promo Impact Periods"]
         for sheet_name in workbook.sheetnames:
             headers = set(next(workbook[sheet_name].iter_rows(values_only=True)))
-            assert not headers.intersection(BUSINESS_REPORT_EXCLUDED_COLUMNS)
+            if sheet_name != "Promo Impact Periods":
+                assert not headers.intersection(BUSINESS_REPORT_EXCLUDED_COLUMNS)
         assert workbook["High Performers"].max_row == 2
+    finally:
+        if workbook is not None:
+            workbook.close()
+            path.unlink(missing_ok=True)
+
+
+def test_exports_external_impact_flags_and_periods():
+    path = Path("artifacts/test_impact_report.xlsx")
+    workbook = None
+    periods = pd.DataFrame(
+        {
+            "Game_ID": ["forecast-game"],
+            "SystemName": ["System"],
+            "TournamentName": ["Game"],
+            "Start_Date": ["2026-01-04"],
+            "End_Date": ["2026-01-04"],
+            "Metric": ["Clients"],
+            "Direction": ["Spike"],
+            "Baseline_Value": [10.0],
+            "Observed_Value": [20.0],
+            "Percent_Change": [100.0],
+            "Severity": ["High"],
+            "Reason": ["Inferred external impact"],
+        }
+    )
+    forecasts = pd.DataFrame(
+        {
+            "Game_ID": ["forecast-game"],
+            "external_impact_detected": [True],
+            "external_impact_periods": ["2026-01-04 to 2026-01-04 (Clients spike)"],
+            "external_impact_reason": ["Inferred external impact"],
+        }
+    )
+
+    try:
+        export_excel(
+            path,
+            comparison=pd.DataFrame(),
+            forecasts=forecasts,
+            regression=pd.DataFrame(),
+            classification=pd.DataFrame(),
+            impact_periods=periods,
+        )
+        workbook = load_workbook(path, read_only=True)
+        headers = next(workbook["Forecasts"].iter_rows(values_only=True))
+        assert "external_impact_detected" in headers
+        assert list(workbook["Promo Impact Periods"].iter_rows(values_only=True))[1][0] == "forecast-game"
     finally:
         if workbook is not None:
             workbook.close()

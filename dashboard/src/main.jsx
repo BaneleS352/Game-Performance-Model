@@ -19,6 +19,7 @@ const workbookSheetLabels = {
   future_performance_score_calcul: "Future Performance Score Calculator",
 };
 const uploadPageName = "__new_workbook__";
+const activeJobStorageKey = "game-performance-active-job";
 
 const money = new Intl.NumberFormat("en-ZA", {
   style: "currency",
@@ -464,6 +465,51 @@ function UploadPanel({ onDashboardData, reportUrls, onReportUrlsChange }) {
   const [status, setStatus] = useState("idle");
   const [message, setMessage] = useState("");
 
+  useEffect(() => {
+    const jobId = window.localStorage.getItem(activeJobStorageKey);
+    if (!jobId) return undefined;
+    let active = true;
+    let timer;
+
+    async function poll() {
+      try {
+        const job = await readJson(await fetch(`/api/runs/${jobId}`));
+        if (!active) return;
+        setUpload({ id: job.upload_id, name: job.upload_name });
+        setSheetName(job.sheet_name);
+        if (job.status === "queued" || job.status === "running") {
+          setStatus("running");
+          setMessage(job.message || "The production model is running...");
+          timer = window.setTimeout(poll, 1500);
+          return;
+        }
+        window.localStorage.removeItem(activeJobStorageKey);
+        if (job.status === "completed") {
+          const result = job.result;
+          onDashboardData(await readJson(await fetch("/api/dashboard-data")));
+          setStatus("success");
+          setMessage(`${whole.format(result.summary.games_scored)} games scored from ${job.upload_name}.`);
+          onReportUrlsChange({ business: result.business_report_url, analysis: result.model_analysis_url });
+        } else {
+          setStatus("error");
+          setMessage(job.error || job.message || "Scoring failed.");
+        }
+      } catch (error) {
+        if (active) {
+          window.localStorage.removeItem(activeJobStorageKey);
+          setStatus("error");
+          setMessage(error.message);
+        }
+      }
+    }
+
+    poll();
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [onDashboardData, onReportUrlsChange]);
+
   async function chooseWorkbook(event) {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -472,6 +518,7 @@ function UploadPanel({ onDashboardData, reportUrls, onReportUrlsChange }) {
     setSheetName("");
     setMessage("");
     onReportUrlsChange(null);
+    window.localStorage.removeItem(activeJobStorageKey);
     setStatus("uploading");
     try {
       const payload = await readJson(await fetch("/api/uploads", {
@@ -493,19 +540,16 @@ function UploadPanel({ onDashboardData, reportUrls, onReportUrlsChange }) {
   async function runModel() {
     if (!upload || !sheetName) return;
     setStatus("running");
-    setMessage("Running the complete production model. This may take several minutes...");
+    setMessage("Starting the complete production model. You can leave this section; the run will continue.");
     onReportUrlsChange(null);
     try {
-      const result = await readJson(await fetch(`/api/uploads/${upload.id}/run`, {
+      const job = await readJson(await fetch(`/api/uploads/${upload.id}/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sheet_name: sheetName }),
       }));
-      const dashboardData = await readJson(await fetch("/api/dashboard-data"));
-      onDashboardData(dashboardData);
-      setStatus("success");
-      setMessage(`${whole.format(result.summary.games_scored)} games scored from ${upload.name}.`);
-      onReportUrlsChange({ business: result.business_report_url, analysis: result.model_analysis_url });
+      window.localStorage.setItem(activeJobStorageKey, job.job_id);
+      setMessage(job.message);
     } catch (error) {
       setStatus("error");
       setMessage(error.message);

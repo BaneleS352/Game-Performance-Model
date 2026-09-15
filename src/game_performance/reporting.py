@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from .features import FORECAST_HORIZON_DAYS, OBSERVATION_WINDOW_DAYS
+from .impact import IMPACT_PERIOD_COLUMNS
 from .validation import create_high_performance_target, split_development_and_holdout
 
 
@@ -508,6 +509,9 @@ def _forecast_export_columns(forecasts: pd.DataFrame) -> pd.DataFrame:
         "requires_review",
         "review_reason",
         "review_priority",
+        "external_impact_detected",
+        "external_impact_periods",
+        "external_impact_reason",
         "probability_high_client_performer",
         "predicted_high_client_performer",
         "probability_high_stakes_performer",
@@ -590,6 +594,7 @@ def export_business_report(
     *,
     comparison: pd.DataFrame,
     forecasts: pd.DataFrame,
+    impact_periods: pd.DataFrame | None = None,
 ) -> Path:
     """Export the concise workbook used by business stakeholders."""
     return _write_excel(
@@ -599,6 +604,7 @@ def export_business_report(
             ("Holdout Comparison", _business_report_view(comparison)),
             ("High Performers", _business_report_view(_high_performers(forecasts))),
             ("Forecasting", _business_report_view(_forecast_export_columns(forecasts))),
+            ("Promo Impact Periods", impact_periods if isinstance(impact_periods, pd.DataFrame) else pd.DataFrame(columns=IMPACT_PERIOD_COLUMNS)),
         ],
     )
 
@@ -613,6 +619,7 @@ def export_excel(
     calibration: pd.DataFrame | None = None,
     configuration_leaderboard: pd.DataFrame | None = None,
     uncertainty_validation: pd.DataFrame | None = None,
+    impact_periods: pd.DataFrame | None = None,
 ):
     """Export the complete Model Analysis workbook."""
     path = Path(path)
@@ -624,6 +631,7 @@ def export_excel(
         ("High Performers", _high_performers(comparison)),
         ("Forecasts", _forecast_export_columns(forecasts)),
         ("Model Accuracy", _model_accuracy(regression)),
+        ("Promo Impact Periods", impact_periods if isinstance(impact_periods, pd.DataFrame) else pd.DataFrame(columns=IMPACT_PERIOD_COLUMNS)),
     ]
     sheets.extend(
         (name, frame)
