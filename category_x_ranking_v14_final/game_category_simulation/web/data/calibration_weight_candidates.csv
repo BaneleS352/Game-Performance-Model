@@ -1,0 +1,2 @@
+current,momentum,acceleration,stability,mean_spearman,mean_top10,mean_top20,mean_top100,mean_rank_error,calibration_objective
+0.65,0.15,0.05,0.15,0.9238643747590539,0.5733333333333334,0.6066666666666667,0.7766666666666666,200.14001003950062,0.7128525311656688

@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Category X Ranking Lab</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app-shell" id="appShell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-top">
+      <div class="brand">
+        <div class="brand-mark">X</div>
+        <div class="brand-copy"><strong>Category X</strong><small>Ranking Lab</small></div>
+      </div>
+      <button class="sidebar-toggle" id="sidebarToggle" type="button" aria-label="Toggle sidebar">&#9776;</button>
+    </div>
+    <nav class="nav" aria-label="Primary">
+      <button class="nav-item active" data-view="dashboard" title="Dashboard"><span class="nav-icon">&#9638;</span><span class="nav-label">Dashboard</span></button>
+      <button class="nav-item" data-view="website" title="Website"><span class="nav-icon">&#9633;</span><span class="nav-label">Website</span></button>
+    </nav>
+    <div class="sidebar-bottom">
+      <div class="pipeline-status" id="pipelineStatus"><span class="status-dot"></span><span class="status-text">Checking...</span></div>
+    </div>
+  </aside>
+
+  <div class="main-shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">CATEGORY X · RANKING LAB</div>
+        <h1 id="pageTitle">Dynamic Game Placement Simulation</h1>
+        <p id="subtitle">Loading simulation data...</p>
+      </div>
+      <div class="date-control">
+        <button id="prevBtn" aria-label="Previous day">&#8249;</button>
+        <select id="dateSelect" aria-label="Evaluation date"></select>
+        <button id="nextBtn" aria-label="Next day">&#8250;</button>
+      </div>
+    </header>
+
+    <main>
+      <section id="dashboardView" class="view">
+        <section class="summary-grid" id="summaryGrid"></section>
+
+        <section class="panel intro-panel">
+          <div>
+            <div class="panel-kicker">HOW THIS SIMULATION WORKS</div>
+            <h2>30-day calibration → 30-day walk-forward evaluation</h2>
+            <p>The first 30 days establish the starting signals. Each evaluation day uses only history available before that day. The score establishes ideal order, while controlled movement rules determine the actual website position.</p>
+          </div>
+          <div class="legend"><span><b class="dot green"></b> Improving</span><span><b class="dot red"></b> Declining</span><span><b class="dot gray"></b> Stable</span></div>
+        </section>
+
+        <section class="content-grid">
+          <section class="panel leaderboard-panel">
+            <div class="panel-head">
+              <div><div class="panel-kicker">DASHBOARD</div><h2>Simulated website placement</h2><span id="rankMeta" class="muted"></span></div>
+              <div class="table-tools"><input id="rankSearch" type="search" placeholder="Search games..."><select id="rankFilter"><option value="ALL">All states</option><option>Rapid Growth</option><option>Growing</option><option>Strong &amp; Steady</option><option>Stable</option><option>Slowing</option><option>Declining</option></select></div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Website position</th><th>Game</th><th>Move</th><th>Momentum</th><th>Score</th><th>State</th></tr></thead>
+                <tbody id="rankTable"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <aside class="panel detail-panel">
+            <div class="panel-kicker">GAME PERFORMANCE</div>
+            <h2>Inspect a game</h2>
+            <input id="gameSearch" list="gameList" type="search" placeholder="Search for a game...">
+            <datalist id="gameList"></datalist>
+            <select id="gameSelect" aria-label="Select a game"></select>
+            <div id="gameDetail"><div class="detail-empty">Select a game.</div></div>
+          </aside>
+        </section>
+
+        <section class="panel evaluation-panel">
+          <div class="panel-head">
+            <div><div class="panel-kicker">ALGORITHM EVALUATION</div><h2>Does the ranking beat simple alternatives?</h2><p class="muted">Results use only the 30 unseen evaluation days.</p></div>
+          </div>
+          <div class="eval-grid" id="evalCards"></div>
+          <div class="table-wrap small"><table><thead><tr><th>Method</th><th>Avg rank correlation</th><th>Avg Top-10 overlap</th><th>Avg Top-10 actual score</th></tr></thead><tbody id="baselineTable"></tbody></table></div>
+          <div class="ablation-block"><div class="panel-head compact-head"><div><div class="panel-kicker">ABLATION TEST</div><h3>Which signals actually help?</h3><p class="muted">These rankings use only information available before each evaluation day and compare score quality before controlled movement.</p></div></div><div class="table-wrap small"><table><thead><tr><th>Variant</th><th>Correlation</th><th>Top-10</th><th>Top-20</th><th>Top-100</th><th>Rank error</th></tr></thead><tbody id="ablationTable"></tbody></table></div></div>
+        </section>
+      </section>
+
+      <section id="websiteView" class="view hidden">
+        <section class="panel website-header-panel">
+          <div>
+            <div class="panel-kicker">CATEGORY X · WEBSITE</div>
+            <h2>Simulated website placement</h2>
+            <p id="websiteMeta" class="muted"></p>
+          </div>
+          <div class="website-note">The first 300 positions are shown exactly in the order produced by the ranking engine.</div>
+        </section>
+        <section class="website-grid-panel">
+          <div class="website-grid" id="websiteGrid"></div>
+        </section>
+      </section>
+    </main>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
