@@ -16,14 +16,25 @@ DEFAULT_FORECAST_COLUMNS = {
     "Obs_Window",
     "Horizon",
     "First_Observed_Date",
-    "predicted_clients_week_4_low",
-    "predicted_clients_week_4",
-    "predicted_clients_week_4_high",
+    "predicted_clients_low",
+    "predicted_clients",
+    "predicted_clients_high",
     "confidence_clients",
-    "predicted_stakes_week_4_low",
-    "predicted_stakes_week_4",
-    "predicted_stakes_week_4_high",
+    "predicted_stakes_low",
+    "predicted_stakes",
+    "predicted_stakes_high",
     "confidence_stakes",
+    "predicted_betcount_low",
+    "predicted_betcount",
+    "predicted_betcount_high",
+    "confidence_betcount",
+    "predicted_ggr_low",
+    "predicted_ggr",
+    "predicted_ggr_high",
+    "confidence_ggr",
+    "requires_review",
+    "review_reason",
+    "review_priority",
     "probability_high_client_performer",
     "predicted_high_client_performer",
     "probability_high_stakes_performer",
@@ -64,6 +75,22 @@ def _records(frame: pd.DataFrame, fields: list[str]) -> list[dict[str, Any]]:
 
 
 def _label(column: str) -> str:
+    forecast_labels = {
+        "predicted_clients_low": "Next 7 Days Clients Low",
+        "predicted_clients": "Next 7 Days Clients",
+        "predicted_clients_high": "Next 7 Days Clients High",
+        "predicted_stakes_low": "Next 7 Days Stakes Low",
+        "predicted_stakes": "Next 7 Days Stakes",
+        "predicted_stakes_high": "Next 7 Days Stakes High",
+        "predicted_betcount_low": "Next 7 Days Bet Count Low",
+        "predicted_betcount": "Next 7 Days Bet Count",
+        "predicted_betcount_high": "Next 7 Days Bet Count High",
+        "predicted_ggr_low": "Next 7 Days GGR Low",
+        "predicted_ggr": "Next 7 Days GGR",
+        "predicted_ggr_high": "Next 7 Days GGR High",
+    }
+    if column in forecast_labels:
+        return forecast_labels[column]
     return column.replace("_", " ").replace("pct", "%").title()
 
 
@@ -132,27 +159,14 @@ def build_dashboard_data(workbook_path: str | Path) -> dict[str, Any]:
     holdout = _latest_checkpoint(pd.read_excel(workbook_path, sheet_name="Holdout Comparison"), "Obs_Window")
     forecast_fields = list(forecasts.columns)
 
-    for metric in ("clients", "stakes"):
+    for metric in ("clients", "stakes", "betcount", "ggr"):
         generic = f"predicted_{metric}"
-        legacy = f"predicted_{metric}_week_4"
-        if generic not in forecasts and legacy in forecasts:
-            forecasts[generic] = forecasts[legacy]
-        for suffix in ("_low", "_high"):
-            generic_band = f"predicted_{metric}{suffix}"
-            legacy_band = f"predicted_{metric}_week_4{suffix}"
-            if generic_band not in forecasts and legacy_band in forecasts:
-                forecasts[generic_band] = forecasts[legacy_band]
-
-    forecasts["predicted_clients"] = pd.to_numeric(
-        forecasts["predicted_clients"],
-        errors="coerce",
-    ).fillna(0)
-    forecasts["predicted_stakes"] = pd.to_numeric(
-        forecasts["predicted_stakes"],
-        errors="coerce",
-    ).fillna(0)
-    forecasts["predicted_clients_week_4"] = forecasts["predicted_clients"]
-    forecasts["predicted_stakes_week_4"] = forecasts["predicted_stakes"]
+        forecasts[generic] = pd.to_numeric(
+            forecasts.get(generic, pd.Series(0, index=forecasts.index)), errors="coerce"
+        ).fillna(0)
+        confidence = f"confidence_{metric}"
+        if confidence not in forecasts:
+            forecasts[confidence] = np.nan
 
     system_summary = (
         forecasts.groupby("SystemName", dropna=False)
@@ -160,13 +174,15 @@ def build_dashboard_data(workbook_path: str | Path) -> dict[str, Any]:
             games=("Game_ID", "count"),
             predicted_clients=("predicted_clients", "sum"),
             predicted_stakes=("predicted_stakes", "sum"),
-            predicted_clients_week_4=("predicted_clients_week_4", "sum"),
-            predicted_stakes_week_4=("predicted_stakes_week_4", "sum"),
+            predicted_betcount=("predicted_betcount", "sum"),
+            predicted_ggr=("predicted_ggr", "sum"),
             confidence_clients=("confidence_clients", "mean"),
             confidence_stakes=("confidence_stakes", "mean"),
+            confidence_betcount=("confidence_betcount", "mean"),
+            confidence_ggr=("confidence_ggr", "mean"),
         )
         .reset_index()
-        .sort_values("predicted_stakes_week_4", ascending=False)
+        .sort_values("predicted_stakes", ascending=False)
     )
 
     summary = {
@@ -174,12 +190,14 @@ def build_dashboard_data(workbook_path: str | Path) -> dict[str, Any]:
         "games_scored": int(len(forecasts)),
         "systems_scored": int(forecasts["SystemName"].nunique()),
         "holdout_games": int(len(holdout)),
-            "total_predicted_clients_week_4": float(forecasts["predicted_clients_week_4"].sum()),
-            "total_predicted_stakes_week_4": float(forecasts["predicted_stakes_week_4"].sum()),
             "total_predicted_clients": float(forecasts["predicted_clients"].sum()),
             "total_predicted_stakes": float(forecasts["predicted_stakes"].sum()),
+            "total_predicted_betcount": float(forecasts["predicted_betcount"].sum()),
+            "total_predicted_ggr": float(forecasts["predicted_ggr"].sum()),
         "confidence_clients": _safe_rate(forecasts["confidence_clients"]),
         "confidence_stakes": _safe_rate(forecasts["confidence_stakes"]),
+        "confidence_betcount": _safe_rate(forecasts["confidence_betcount"]),
+        "confidence_ggr": _safe_rate(forecasts["confidence_ggr"]),
         "holdout_off_by_10_rate": _safe_rate(holdout.get("off_by_10_pct", pd.Series(dtype=float))),
         "holdout_off_by_20_rate": _safe_rate(holdout.get("off_by_20_pct", pd.Series(dtype=float))),
         "avg_probability_clients": _safe_rate(holdout.get("probability_clients", pd.Series(dtype=float))),
@@ -189,14 +207,15 @@ def build_dashboard_data(workbook_path: str | Path) -> dict[str, Any]:
 
     top_stakes = forecasts.sort_values("predicted_stakes", ascending=False).head(250)
     top_clients = forecasts.sort_values("predicted_clients", ascending=False).head(250)
-    observation_coverage = pd.to_numeric(
-        forecasts.get("observation_coverage", pd.Series(1.0, index=forecasts.index)),
-        errors="coerce",
-    ).fillna(1)
     review_candidates = forecasts.assign(
-        value_rank=forecasts["predicted_stakes"].rank(ascending=False, method="first"),
-        coverage_gap=1 - observation_coverage,
-    ).sort_values(["coverage_gap", "predicted_stakes"], ascending=[False, False]).head(250)
+        requires_review=forecasts.get("requires_review", pd.Series(False, index=forecasts.index)).fillna(False),
+        review_priority=pd.to_numeric(
+            forecasts.get("review_priority", pd.Series(0, index=forecasts.index)), errors="coerce"
+        ).fillna(0),
+    )
+    review_candidates = review_candidates[review_candidates["requires_review"]].sort_values(
+        ["review_priority", "predicted_stakes"], ascending=[False, False]
+    ).head(250)
 
     return {
         "summary": summary,
@@ -207,10 +226,12 @@ def build_dashboard_data(workbook_path: str | Path) -> dict[str, Any]:
                 "games",
                 "predicted_clients",
                 "predicted_stakes",
-                "predicted_clients_week_4",
-                "predicted_stakes_week_4",
+                "predicted_betcount",
+                "predicted_ggr",
                 "confidence_clients",
                 "confidence_stakes",
+                "confidence_betcount",
+                "confidence_ggr",
             ],
         ),
         "columns": {

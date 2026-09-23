@@ -11,15 +11,21 @@ class Settings:
     source_file: Path = field(default_factory=lambda: Path(os.getenv("GAME_DATA_FILE", "data/raw/game_performance.xlsx")))
     random_seed: int = 42
     high_performer_percentile: float = 0.80
+    classification_threshold: float = 0.80
     rolling_validation_folds: int = 4
+    training_fraction: float = 0.70
+    validation_fraction: float = 0.15
     final_test_fraction: float = 0.15
     min_training_rows: int = 100
     min_validation_rows: int = 25
     min_calibration_rows: int = 50
     calibration_bins: int = 10
+    prediction_interval_coverage: float = 0.80
+    review_confidence_threshold: float = 0.50
+    review_relative_width_threshold: float = 1.00
     forecast_horizon: int = 7
     candidate_checkpoints: tuple[int, ...] = (21, 28, 35, 42, 49, 56)
-    training_window_days: tuple[int | None, ...] = (None, 30, 60, 90, 120)
+    training_window_days: tuple[int | None, ...] = (None,)
     selection_mode: str = "quick"
     representative_tuning_checkpoint: int = 21
     representative_tuning_horizon: int = 7

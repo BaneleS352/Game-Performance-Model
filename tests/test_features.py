@@ -1,19 +1,28 @@
 import pandas as pd
 
 from game_performance.data import clean_game_daily
-from game_performance.features import build_four_week_snapshot, build_lifecycle_snapshot, build_week4_snapshot, prepare_features
+from game_performance.features import build_lifecycle_snapshot, prepare_features
+
+
+def _daily_data(periods=28, **metrics):
+    return clean_game_daily(pd.DataFrame({
+        "Date": pd.date_range("2026-01-01", periods=periods),
+        "SystemName": ["SYS"] * periods,
+        "TournamentName": ["Game"] * periods,
+        "Clients": metrics.get("Clients", [1] * periods),
+        "BetCount": metrics.get("BetCount", [2] * periods),
+        "Stakes": metrics.get("Stakes", [10] * periods),
+        "GGR": metrics.get("GGR", [1] * periods),
+    }))
 
 
 def test_live_snapshot_contains_no_future_targets():
-    raw = pd.DataFrame({
-        "Date": pd.date_range("2026-01-01", periods=7),
-        "SystemName": ["SYS"] * 7,
-        "TournamentName": ["Game"] * 7,
-        "Clients": range(1, 8),
-        "Stakes": range(10, 17),
-    })
-    data = clean_game_daily(raw)
-    snapshot = build_lifecycle_snapshot(data, 7, 7, require_future=False)
+    snapshot = build_lifecycle_snapshot(
+        _daily_data(7, Clients=range(1, 8), BetCount=range(20, 27), Stakes=range(10, 17), GGR=range(2, 9)),
+        7,
+        7,
+        require_future=False,
+    )
 
     assert len(snapshot) == 1
     assert not any(column.startswith("target_") for column in snapshot.columns)
@@ -23,134 +32,84 @@ def test_live_snapshot_contains_no_future_targets():
     assert snapshot.loc[0, "Observation_End_Weekday"] == "Wednesday"
 
 
-def test_historical_snapshot_targets_clients_and_stakes_only():
-    raw = pd.DataFrame({
-        "Date": pd.date_range("2026-01-01", periods=14),
-        "SystemName": ["SYS"] * 14,
-        "TournamentName": ["Game"] * 14,
-        "Clients": range(1, 15),
-        "Stakes": range(10, 24),
-    })
-    data = clean_game_daily(raw)
-    snapshot = build_lifecycle_snapshot(data, 7, 7, require_future=True)
+def test_historical_snapshot_targets_all_regression_metrics():
+    snapshot = build_lifecycle_snapshot(
+        _daily_data(14, Clients=range(1, 15), BetCount=range(20, 34), Stakes=range(10, 24), GGR=range(2, 16)),
+        7,
+        7,
+    )
 
-    target_columns = [column for column in snapshot.columns if column.startswith("target_")]
-    assert target_columns == [
-        "target_clients",
-        "target_stakes",
-        "target_clients_week_1",
-        "target_clients_week_2",
-        "target_stakes_week_1",
-        "target_stakes_week_2",
-    ]
+    assert {
+        "target_clients", "target_stakes", "target_betcount", "target_ggr",
+        "target_clients_week_1", "target_clients_week_2",
+        "target_stakes_week_1", "target_stakes_week_2",
+    }.issubset(snapshot.columns)
 
 
-def test_four_week_snapshot_uses_week_4_targets():
-    raw = pd.DataFrame({
-        "Date": pd.date_range("2026-01-01", periods=28),
-        "SystemName": ["SYS"] * 28,
-        "TournamentName": ["Game"] * 28,
-        "Clients": [1] * 28,
-        "Stakes": [10] * 28,
-    })
-    data = clean_game_daily(raw)
-    snapshot = build_four_week_snapshot(data)
+def test_snapshot_targets_the_next_seven_days():
+    snapshot = build_lifecycle_snapshot(_daily_data(), 14, 7)
 
     assert len(snapshot) == 1
     assert snapshot.loc[0, "Obs_Window"] == 14
-    assert snapshot.loc[0, "Horizon"] == 14
-    assert snapshot.loc[0, "actual_clients_week_3"] == 7
-    assert snapshot.loc[0, "actual_clients_week_4"] == 7
+    assert snapshot.loc[0, "Horizon"] == 7
+    assert snapshot.loc[0, "Prediction_Start"] == pd.Timestamp("2026-01-15")
+    assert snapshot.loc[0, "Prediction_End"] == pd.Timestamp("2026-01-21")
     assert snapshot.loc[0, "target_clients"] == 7
     assert snapshot.loc[0, "target_stakes"] == 70
+    assert snapshot.loc[0, "target_betcount"] == 14
+    assert snapshot.loc[0, "target_ggr"] == 7
 
 
-def test_four_week_snapshot_adds_week_1_and_2_training_signals():
-    raw = pd.DataFrame({
-        "Date": pd.date_range("2026-01-01", periods=28),
-        "SystemName": ["SYS"] * 28,
-        "TournamentName": ["Game"] * 28,
-        "Clients": ([10] * 7) + ([20] * 7) + ([30] * 14),
-        "Stakes": ([100] * 7) + ([150] * 7) + ([200] * 14),
-    })
-    data = clean_game_daily(raw)
-    snapshot = build_four_week_snapshot(data)
+def test_snapshot_adds_commercial_driver_targets_and_margin_features():
+    snapshot = build_lifecycle_snapshot(
+        _daily_data(14, Clients=[2] * 14, BetCount=[6] * 14, Stakes=[30] * 14, GGR=[-3] * 14),
+        7,
+        7,
+    )
 
+    assert snapshot.loc[0, "target_bets_per_client"] == 3
+    assert snapshot.loc[0, "target_stake_per_bet"] == 5
+    assert snapshot.loc[0, "target_ggr_margin"] == -0.1
+    assert snapshot.loc[0, "ggr_margin"] == -0.1
+    assert snapshot.loc[0, "ggr_margin_week_1"] == -0.1
+
+
+def test_commercial_driver_targets_are_missing_when_future_denominators_are_zero():
+    snapshot = build_lifecycle_snapshot(
+        _daily_data(14, Clients=([2] * 7) + ([0] * 7), BetCount=([6] * 7) + ([0] * 7), Stakes=([30] * 7) + ([0] * 7)),
+        7,
+        7,
+    )
+
+    assert pd.isna(snapshot.loc[0, "target_bets_per_client"])
+    assert pd.isna(snapshot.loc[0, "target_stake_per_bet"])
+    assert pd.isna(snapshot.loc[0, "target_ggr_margin"])
+
+
+def test_latest_snapshot_uses_the_final_as_of_date_for_the_forecast_window():
+    data = _daily_data(35, Clients=([1] * 14) + ([10] * 21))
+    as_of_date = data["Date"].max()
+
+    snapshot = build_lifecycle_snapshot(data, 21, 7, require_future=False, as_of_date=as_of_date)
+
+    assert snapshot.loc[0, "Lifecycle_Stage"] == "Latest 21-day window"
+    assert snapshot.loc[0, "Prediction_Start"] == as_of_date + pd.Timedelta(days=1)
+    assert snapshot.loc[0, "Prediction_End"] == as_of_date + pd.Timedelta(days=7)
     assert snapshot.loc[0, "clients_week_1_sum"] == 70
-    assert snapshot.loc[0, "clients_week_2_sum"] == 140
-    assert snapshot.loc[0, "clients_week_1_to_2_growth"] == 1
-    assert snapshot.loc[0, "stakes_week_1_sum"] == 700
-    assert snapshot.loc[0, "stakes_week_2_sum"] == 1050
-    assert snapshot.loc[0, "stakes_week_1_to_2_growth"] == 0.5
-    assert snapshot.loc[0, "Clients_Size_Band"] == "Medium"
-    assert snapshot.loc[0, "Stakes_Size_Band"] == "Small"
+    assert snapshot.loc[0, "clients_week_3_sum"] == 70
 
 
-def test_snapshot_adds_betcount_features_when_available():
-    raw = pd.DataFrame({
-        "Date": pd.date_range("2026-01-01", periods=28),
-        "SystemName": ["SYS"] * 28,
-        "TournamentName": ["Game"] * 28,
-        "Clients": [10] * 28,
-        "Stakes": [100] * 28,
-        "Betcount": [20] * 28,
-    })
-    data = clean_game_daily(raw)
-    snapshot = build_four_week_snapshot(data)
-
-    assert snapshot.loc[0, "obs_betcount_sum"] == 280
-    assert snapshot.loc[0, "betcount_week_1_sum"] == 140
-    assert snapshot.loc[0, "betcount_week_2_sum"] == 140
-    assert snapshot.loc[0, "bets_per_client"] == 2
-    assert snapshot.loc[0, "stake_per_bet"] == 5
-
-
-def test_day_21_snapshot_targets_week_4_and_keeps_week_3_observed():
-    raw = pd.DataFrame({
-        "Date": pd.date_range("2026-01-01", periods=28),
-        "SystemName": ["SYS"] * 28,
-        "TournamentName": ["Game"] * 28,
-        "Clients": ([1] * 7) + ([2] * 7) + ([3] * 7) + ([4] * 7),
-        "Stakes": ([10] * 7) + ([20] * 7) + ([30] * 7) + ([40] * 7),
-        "Betcount": ([5] * 7) + ([6] * 7) + ([7] * 7) + ([8] * 7),
-    })
-    data = clean_game_daily(raw)
-    snapshot = build_week4_snapshot(data, 21)
-
-    assert snapshot.loc[0, "Obs_Window"] == 21
-    assert snapshot.loc[0, "Horizon"] == 7
-    assert snapshot.loc[0, "clients_week_2_sum"] == 14
-    assert snapshot.loc[0, "clients_week_3_sum"] == 21
-    assert snapshot.loc[0, "betcount_week_3_sum"] == 49
-    assert snapshot.loc[0, "actual_clients_week_4"] == 28
-    assert snapshot.loc[0, "target_clients"] == 28
-
-
-def test_day_21_forecast_snapshot_targets_only_days_22_to_28():
-    raw = pd.DataFrame({
-        "Date": pd.date_range("2026-01-01", periods=35),
-        "SystemName": ["SYS"] * 35,
-        "TournamentName": ["Game"] * 35,
-        "Clients": ([1] * 21) + ([10] * 7) + ([100] * 7),
-        "Stakes": [1] * 35,
-    })
-    snapshot = build_lifecycle_snapshot(clean_game_daily(raw), 21, 7, require_future=True)
-
-    assert snapshot.loc[0, "Prediction_Start"] == pd.Timestamp("2026-01-22")
-    assert snapshot.loc[0, "Prediction_End"] == pd.Timestamp("2026-01-28")
-    assert snapshot.loc[0, "target_clients"] == 70
-
-
-def test_betcount_trends_and_weekly_efficiency_growth_reach_model_features():
-    raw = pd.DataFrame({
-        "Date": pd.date_range("2026-01-01", periods=28),
-        "SystemName": ["SYS"] * 28,
-        "TournamentName": ["Game"] * 28,
-        "Clients": ([10] * 7) + ([20] * 7) + ([20] * 14),
-        "Stakes": ([100] * 7) + ([400] * 7) + ([300] * 14),
-        "Betcount": ([20] * 7) + ([40] * 7) + ([30] * 7) + ([25] * 7),
-    })
-    snapshot = build_week4_snapshot(clean_game_daily(raw), 21)
+def test_weekly_features_reach_model_features():
+    snapshot = build_lifecycle_snapshot(
+        _daily_data(
+            Clients=([10] * 7) + ([20] * 7) + ([20] * 14),
+            Stakes=([100] * 7) + ([400] * 7) + ([300] * 14),
+            BetCount=([20] * 7) + ([40] * 7) + ([30] * 7) + ([25] * 7),
+            GGR=([10] * 7) + ([40] * 7) + ([30] * 14),
+        ),
+        21,
+        7,
+    )
     features = prepare_features(snapshot)
 
     assert snapshot.loc[0, "betcount_week_2_to_3_growth"] == -0.25

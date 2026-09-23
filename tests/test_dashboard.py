@@ -15,9 +15,9 @@ def _sample_workbook(path: Path) -> None:
             "TournamentName": ["Game A", "Game B"],
             "SystemName": ["SYS", "SYS"],
             "First_Observed_Date": pd.to_datetime(["2026-01-01", "2026-01-02"]),
-            "predicted_clients_week_4": [100, 50],
+            "predicted_clients": [100, 50],
             "confidence_clients": [0.8, 0.6],
-            "predicted_stakes_week_4": [1000, 500],
+            "predicted_stakes": [1000, 500],
             "confidence_stakes": [0.7, 0.4],
             "probability_high_performance": [0.9, 0.1],
             "active_observation_days": [14, 14],
@@ -51,7 +51,8 @@ def test_dashboard_data_summarises_workbook():
 
         assert data["summary"]["games_scored"] == 2
         assert data["summary"]["holdout_games"] == 1
-        assert data["summary"]["total_predicted_stakes_week_4"] == 1500
+        assert data["summary"]["total_predicted_stakes"] == 1500
+        assert data["summary"]["total_predicted_ggr"] == 1998
         assert data["summary"]["avg_probability_clients"] == 0.9
         assert data["systems"][0]["SystemName"] == "SYS"
         assert data["forecasts"][0]["confidence_clients"] == 0.8
@@ -69,7 +70,7 @@ def test_dashboard_data_summarises_workbook():
             for column in data["columns"]["forecasts"]
         )
         assert any(
-            column["key"] == "predicted_stakes_week_4" and column["defaultVisible"]
+            column["key"] == "predicted_stakes" and column["defaultVisible"]
             for column in data["columns"]["forecasts"]
         )
     finally:
@@ -104,9 +105,9 @@ def test_dashboard_uses_latest_checkpoint_for_each_game():
                 "TournamentName": ["Game A", "Game A"],
                 "SystemName": ["SYS", "SYS"],
                 "Checkpoint": [14, 21],
-                "predicted_clients_week_4": [100, 120],
+                "predicted_clients": [100, 120],
                 "confidence_clients": [0.6, 0.8],
-                "predicted_stakes_week_4": [1000, 1500],
+                "predicted_stakes": [1000, 1500],
                 "confidence_stakes": [0.5, 0.7],
             }
         )
@@ -119,7 +120,7 @@ def test_dashboard_uses_latest_checkpoint_for_each_game():
         data = build_dashboard_data(workbook)
 
         assert data["summary"]["games_scored"] == 1
-        assert data["forecasts"][0]["predicted_stakes_week_4"] == 1500
+        assert data["forecasts"][0]["predicted_stakes"] == 1500
         assert data["forecasts"][0]["confidence_clients"] == 0.8
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
@@ -134,9 +135,9 @@ def test_dashboard_uses_latest_checkpoint_holdout_metrics():
             {
                 "Game_ID": ["SYS::Game A"],
                 "SystemName": ["SYS"],
-                "predicted_clients_week_4": [100],
+                "predicted_clients": [100],
                 "confidence_clients": [0.8],
-                "predicted_stakes_week_4": [1000],
+                "predicted_stakes": [1000],
                 "confidence_stakes": [0.7],
             }
         )
@@ -159,5 +160,34 @@ def test_dashboard_uses_latest_checkpoint_holdout_metrics():
         assert data["summary"]["holdout_games"] == 1
         assert data["summary"]["holdout_off_by_10_rate"] == 0
         assert data["summary"]["avg_probability_stakes"] == 0.9
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_dashboard_review_candidates_exclude_unflagged_games():
+    workspace = Path("artifacts/test_dashboard")
+    workbook = workspace / "report.xlsx"
+    try:
+        workspace.mkdir(parents=True, exist_ok=True)
+        forecasts = pd.DataFrame(
+            {
+                "Game_ID": ["SYS::Review", "SYS::Routine"],
+                "SystemName": ["SYS", "SYS"],
+                "predicted_clients": [10, 20],
+                "confidence_clients": [0.4, 0.9],
+                "predicted_stakes": [100, 500],
+                "confidence_stakes": [0.8, 0.9],
+                "requires_review": [True, False],
+                "review_reason": ["low clients confidence", ""],
+                "review_priority": [0.2, 0.0],
+            }
+        )
+        with pd.ExcelWriter(workbook, engine="openpyxl") as writer:
+            pd.DataFrame({"Game_ID": ["SYS::Review"]}).to_excel(writer, sheet_name="Holdout Comparison", index=False)
+            forecasts.to_excel(writer, sheet_name="Forecasts", index=False)
+
+        data = build_dashboard_data(workbook)
+
+        assert [row["Game_ID"] for row in data["review_candidates"]] == ["SYS::Review"]
     finally:
         shutil.rmtree(workspace, ignore_errors=True)

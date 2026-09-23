@@ -1,8 +1,13 @@
 from pathlib import Path
+from io import BytesIO
+from email.message import Message
 
 import pandas as pd
 import pytest
 
+from game_performance.server import DashboardRequestHandler, MAX_UPLOAD_BYTES
+from game_performance.server import UploadState
+import game_performance.server as server
 from game_performance import upload_pipeline
 
 
@@ -13,7 +18,9 @@ def _raw_workbook(path: Path, *, sheet_name: str = "Score me") -> None:
             "SystemName": ["SYS"] * 21,
             "TournamentName": ["Game"] * 21,
             "Clients": [10] * 21,
+            "BetCount": [1000] * 21,
             "Stakes": [100] * 21,
+            "GGR": [20] * 21,
         }
     )
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
@@ -36,9 +43,9 @@ def _forecasts() -> pd.DataFrame:
     )
 
 
-def test_save_uploaded_workbook_rejects_non_xlsx_and_sanitizes_name(tmp_path):
-    with pytest.raises(ValueError, match=".xlsx"):
-        upload_pipeline.save_uploaded_workbook(tmp_path, "scores.csv", b"data")
+def test_save_uploaded_workbook_rejects_unsupported_files_and_sanitizes_name(tmp_path):
+    with pytest.raises(ValueError, match="CSV or Excel"):
+        upload_pipeline.save_uploaded_workbook(tmp_path, "scores.txt", b"data")
 
     source = tmp_path / "source.xlsx"
     _raw_workbook(source)
@@ -51,6 +58,37 @@ def test_save_uploaded_workbook_rejects_non_xlsx_and_sanitizes_name(tmp_path):
     assert upload_id in saved.name
     assert saved.name.endswith("Quarterly_scores.xlsx")
     assert saved.parent == tmp_path / "data" / "uploads"
+
+
+def test_upload_request_allows_65_mb_and_rejects_larger():
+    handler = object.__new__(DashboardRequestHandler)
+    handler.headers = Message()
+    handler.headers["Content-Length"] = str(MAX_UPLOAD_BYTES)
+    handler.rfile = BytesIO(b"x" * 16)
+
+    assert handler._read_body() == b"x" * 16
+
+    handler.headers["Content-Length"] = str(MAX_UPLOAD_BYTES + 1)
+    with pytest.raises(ValueError, match="65 MB"):
+        handler._read_body()
+
+
+def test_background_job_finishes_without_request_connection(tmp_path, monkeypatch):
+    state = UploadState(tmp_path)
+    handler = object.__new__(DashboardRequestHandler)
+    handler.state = state
+    state.jobs["job-1"] = {"job_id": "job-1", "status": "queued"}
+
+    def run_pipeline(*args, progress_callback=None, **kwargs):
+        progress_callback(0.5, "Still running")
+        return {"run_id": "run-1"}
+
+    monkeypatch.setattr(server, "run_full_production_pipeline", run_pipeline)
+    handler._run_job("job-1", "upload-1", tmp_path / "source.xlsx", "Sheet1")
+
+    assert state.jobs["job-1"]["status"] == "completed"
+    assert state.jobs["job-1"]["progress"] == 1
+    assert state.jobs["job-1"]["result"]["business_report_url"] == "/runs/run-1/business-report.xlsx"
 
 
 def test_score_uploaded_workbook_uses_selected_sheet(tmp_path, monkeypatch):
@@ -77,8 +115,78 @@ def test_score_uploaded_workbook_uses_selected_sheet(tmp_path, monkeypatch):
 
     assert loaded_sheets == ["Selected"]
     assert Path(result["report_path"]).is_file()
+    assert Path(result["business_report_path"]).name == "Business Report.xlsx"
+    assert Path(result["model_analysis_path"]).name == "Model Analysis.xlsx"
+    assert Path(result["model_analysis_path"]).is_file()
     assert Path(result["dashboard_data_path"]).is_file()
     assert result["summary"]["games_scored"] == 1
+
+
+def test_run_full_production_pipeline_runs_all_stages(tmp_path, monkeypatch):
+    workbook = tmp_path / "source.xlsx"
+    _raw_workbook(workbook)
+    calls = []
+
+    original_detector = upload_pipeline.detect_external_impact_periods
+
+    def detect_impact(cleaned):
+        calls.append("impact")
+        return original_detector(cleaned)
+
+    def build_features(cleaned, strategy):
+        calls.append("features")
+        return {(21, 7): cleaned.head(1)}
+
+    def train_production(snapshots, settings, **kwargs):
+        calls.append("training")
+        assert kwargs["mode"] == "production"
+        assert kwargs["max_families"] == 0
+        assert kwargs["run_regression"] is True
+        assert kwargs["run_classification"] is True
+        return {
+            "model_bundles": {(21, 7): {}},
+            "holdout_predictions": pd.DataFrame(),
+            "regression_evaluation": pd.DataFrame(),
+            "classification_evaluation": pd.DataFrame(),
+            "classification_calibration": pd.DataFrame(),
+        }
+
+    def score_production(*args, **kwargs):
+        calls.append("scoring")
+        return _forecasts(), pd.DataFrame()
+
+    monkeypatch.setattr(upload_pipeline, "build_all_historical_snapshots", build_features)
+    monkeypatch.setattr(upload_pipeline, "train_all_model_families", train_production)
+    monkeypatch.setattr(upload_pipeline, "run_daily_lifecycle_scoring", score_production)
+    monkeypatch.setattr(upload_pipeline, "detect_external_impact_periods", detect_impact)
+
+    progress = []
+    result = upload_pipeline.run_full_production_pipeline(
+        tmp_path,
+        workbook,
+        "Score me",
+        progress_callback=lambda fraction, message: progress.append((fraction, message)),
+    )
+
+    assert calls == ["impact", "features", "training", "scoring"]
+    assert [fraction for fraction, _ in progress] == [0.05, 0.18, 0.28, 0.76, 0.94, 1.0]
+    assert Path(result["model_path"]).is_file()
+    assert Path(result["business_report_path"]).is_file()
+    assert Path(result["model_analysis_path"]).is_file()
+    assert (tmp_path / "artifacts" / "processed" / "clean_game_daily.pkl").is_file()
+    assert (tmp_path / "artifacts" / "features" / "historical_snapshots.joblib").is_file()
+    assert result["training_metadata"]["pipeline_stages"] == [
+        "01_data_exploration",
+        "02_feature_engineering",
+        "03_model_experiments",
+        "04_training_and_forecasting",
+    ]
+    assert result["training_metadata"]["uploaded_data_days"] == 21
+    assert result["training_metadata"]["temporal_split_fractions"] == {
+        "training": 0.70,
+        "validation": 0.15,
+        "holdout": 0.15,
+    }
 
 
 def test_score_uploaded_workbook_reports_missing_model_and_ineligible_games(tmp_path, monkeypatch):
