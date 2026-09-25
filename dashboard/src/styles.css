@@ -395,22 +395,56 @@ svg {
   box-shadow: 0 0 16px rgba(40, 223, 255, 0.52);
 }
 
+.sheet-menu {
+  position: fixed;
+  top: 12px;
+  left: 16px;
+  z-index: 20;
+}
+
+.sheet-menu summary {
+  display: inline-grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid rgba(214, 121, 255, 0.48);
+  border-radius: 8px;
+  background: rgba(8, 9, 22, 0.86);
+  box-shadow: inset 0 0 18px rgba(140, 37, 255, 0.28);
+  color: #f6f0ff;
+  list-style: none;
+  cursor: pointer;
+}
+
+.sheet-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.sheet-menu summary svg {
+  width: 24px;
+  height: 24px;
+}
+
 .quest-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 8px 0 12px;
-  margin-bottom: 22px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  position: fixed;
+  top: 0;
+  left: 0;
+  display: grid;
+  align-content: start;
+  width: min(320px, 86vw);
+  height: 100dvh;
+  gap: 6px;
+  padding: 14px 12px 16px;
+  border-right: 1px solid rgba(214, 121, 255, 0.34);
+  background: rgba(8, 9, 22, 0.96);
+  box-shadow: var(--shadow-purple);
 }
 
 .quest-tabs button {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 7px;
-  flex: 1 1 150px;
   min-height: 38px;
   padding: 8px 16px;
   border: 0;
@@ -419,7 +453,7 @@ svg {
   color: #e9e6ff;
   font-size: 13px;
   font-weight: 900;
-  text-align: center;
+  text-align: left;
 }
 
 .quest-tabs svg {
@@ -432,6 +466,16 @@ svg {
 .quest-tabs .active {
   background: linear-gradient(90deg, var(--pink), var(--purple));
   box-shadow: var(--shadow-pink);
+}
+
+.quest-tabs .drawer-close {
+  justify-self: end;
+  justify-content: center;
+  width: 38px;
+  min-height: 38px;
+  padding: 0;
+  border: 1px solid rgba(214, 121, 255, 0.38);
+  background: rgba(255, 255, 255, 0.05);
 }
 
 .stat-grid {
