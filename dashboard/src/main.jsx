@@ -159,7 +159,7 @@ function DashboardView({ data, onDashboardData, reportUrls, onReportUrlsChange }
   if (!data) {
     return (
       <main className="arcade-shell">
-        <header className="poster-hero" aria-label="Game Performance Planner">
+        <header className="poster-hero" aria-label="Game Intelligence Platfrom">
           <div className="hero-copy">
             <p className="top-pill"><GamepadIcon /> Forecast performance, compare systems, prioritize value.</p>
             <h1><span>Game</span> Performance Planner</h1>
@@ -280,13 +280,13 @@ function DashboardView({ data, onDashboardData, reportUrls, onReportUrlsChange }
 
   return (
     <main className="arcade-shell">
-      <header className="poster-hero" aria-label="Game Performance Planner">
+      <WorkbookSheetTabs activeSheetName={activeSheetName} onOpenSheet={openSheet} workbookSheets={workbookSheets} />
+      <header className="poster-hero" aria-label="Game Intelligence Platform">
         <div className="hero-copy">
           <p className="top-pill"><GamepadIcon /> Forecast performance, compare systems, prioritize value.</p>
-          <h1><span>Game</span> Performance Planner</h1>
+          <h1><span>Game</span> Intelligence PLatform</h1>
         </div>
       </header>
-      <WorkbookSheetTabs activeSheetName={activeSheetName} onOpenSheet={openSheet} workbookSheets={workbookSheets} />
 
       {isUploadPage ? (
         <UploadPage onDashboardData={onDashboardData} reportUrls={reportUrls} onReportUrlsChange={onReportUrlsChange} />
@@ -609,25 +609,41 @@ function UploadPanel({ onDashboardData, reportUrls, onReportUrlsChange }) {
 
 function WorkbookSheetTabs({ workbookSheets, activeSheetName, onOpenSheet }) {
   const visibleSheets = workbookSheets.filter((sheet) => !hiddenWorkbookSheets.has(sheet.name));
+  function openMenuSheet(event, sheetName) {
+    onOpenSheet(sheetName);
+    event.currentTarget.closest("details").open = false;
+  }
+  function closeMenu(event) {
+    event.currentTarget.closest("details").open = false;
+  }
+
   return (
-    <nav className="quest-tabs" aria-label="Workbook sheets">
-      <button className={!activeSheetName ? "active" : ""} type="button" onClick={() => onOpenSheet("")}>
-        <GridIcon /> Dashboard
-      </button>
-      {visibleSheets.map((sheet) => (
-        <button
-          className={sheet.name === activeSheetName ? "active" : ""}
-          key={sheet.name}
-          type="button"
-          onClick={() => onOpenSheet(sheet.name)}
-        >
-          <SheetIcon /> {sheetLabel(sheet.name)}
+    <details className="sheet-menu">
+      <summary aria-label="Workbook sheets">
+        <MenuIcon />
+      </summary>
+      <nav className="quest-tabs" aria-label="Workbook sheets">
+        <button className="drawer-close" type="button" onClick={closeMenu} aria-label="Close navigation drawer">
+          <CloseIcon />
         </button>
-      ))}
-      <button className={activeSheetName === uploadPageName ? "active" : ""} type="button" onClick={() => onOpenSheet(uploadPageName)}>
-        <SheetIcon /> New Workbook
-      </button>
-    </nav>
+        <button className={!activeSheetName ? "active" : ""} type="button" onClick={(event) => openMenuSheet(event, "")}>
+          <GridIcon /> Dashboard
+        </button>
+        {visibleSheets.map((sheet) => (
+          <button
+            className={sheet.name === activeSheetName ? "active" : ""}
+            key={sheet.name}
+            type="button"
+            onClick={(event) => openMenuSheet(event, sheet.name)}
+          >
+            <SheetIcon /> {sheetLabel(sheet.name)}
+          </button>
+        ))}
+        <button className={activeSheetName === uploadPageName ? "active" : ""} type="button" onClick={(event) => openMenuSheet(event, uploadPageName)}>
+          <SheetIcon /> New Workbook
+        </button>
+      </nav>
+    </details>
   );
 }
 
@@ -760,6 +776,14 @@ function MedalIcon() {
 
 function GridIcon() {
   return <IconBase><path d="M9 9h12v12H9zM27 9h12v12H27zM9 27h12v12H9zM27 27h12v12H27z" /></IconBase>;
+}
+
+function MenuIcon() {
+  return <IconBase><path d="M10 15h28M10 24h28M10 33h28" /></IconBase>;
+}
+
+function CloseIcon() {
+  return <IconBase><path d="M14 14l20 20M34 14 14 34" /></IconBase>;
 }
 
 function SheetIcon() {
