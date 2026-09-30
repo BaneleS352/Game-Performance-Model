@@ -630,6 +630,9 @@ function WorkbookSheetTabs({ workbookSheets, activeSheetName, onOpenSheet }) {
         <button className="drawer-close" type="button" onClick={closeMenu} aria-label="Close navigation drawer">
           <CloseIcon />
         </button>
+        <button className={activeSheetName === placementPageName ? "active" : ""} type="button" onClick={(event) => openMenuSheet(event, placementPageName)}>
+          <PlacementIcon /> Game Placement
+        </button>
         <button className={!activeSheetName ? "active" : ""} type="button" onClick={(event) => openMenuSheet(event, "")}>
           <GridIcon /> Dashboard
         </button>
@@ -643,9 +646,6 @@ function WorkbookSheetTabs({ workbookSheets, activeSheetName, onOpenSheet }) {
             <SheetIcon /> {sheetLabel(sheet.name)}
           </button>
         ))}
-        <button className={activeSheetName === placementPageName ? "active" : ""} type="button" onClick={(event) => openMenuSheet(event, placementPageName)}>
-          <PlacementIcon /> Game Placement
-        </button>
         <button className={activeSheetName === uploadPageName ? "active" : ""} type="button" onClick={(event) => openMenuSheet(event, uploadPageName)}>
           <SheetIcon /> New Workbook
         </button>
@@ -655,140 +655,13 @@ function WorkbookSheetTabs({ workbookSheets, activeSheetName, onOpenSheet }) {
 }
 
 function GamePlacementPage() {
-  const [payload, setPayload] = useState(null);
-  const [status, setStatus] = useState("loading");
-  const [message, setMessage] = useState("");
-  const [refreshing, setRefreshing] = useState(false);
-
-  async function loadPlacements(forceRefresh = false) {
-    setRefreshing(forceRefresh);
-    setStatus("loading");
-    setMessage("");
-    try {
-      const nextPayload = await readJson(await fetch(`/api/placements${forceRefresh ? "?refresh=1" : ""}`));
-      setPayload(nextPayload);
-      setStatus("ready");
-    } catch (error) {
-      setStatus("error");
-      setMessage(error.message);
-    } finally {
-      setRefreshing(false);
-    }
-  }
-
-  useEffect(() => {
-    loadPlacements();
-  }, []);
-
-  if (status === "loading" && !payload) {
-    return <PlacementState title="Loading game placement" message="Scraping the visible lobby ranks and comparing them with the latest forecasts..." busy />;
-  }
-
-  if (status === "error" && !payload) {
-    return (
-      <PlacementState title="Placement data unavailable" message={message}>
-        <button className="run-button" type="button" onClick={() => loadPlacements(true)} disabled={refreshing}><ChartIcon /> Try again</button>
-      </PlacementState>
-    );
-  }
-
-  const summary = payload?.summary ?? {};
   return (
-    <section className="sheet-page quest-card placement-page" aria-labelledby="placement-heading" aria-busy={status === "loading"}>
-      <div className="sheet-page-heading placement-heading">
-        <span className="badge-icon"><PlacementIcon /></span>
-        <div>
-          <h2 id="placement-heading">Game Placement</h2>
-          <p>Model-led moves against the visible Hollywoodbets Hot Right Now ranks.</p>
-        </div>
-        <button className="run-button placement-refresh" type="button" onClick={() => loadPlacements(true)} disabled={refreshing}>
-          <ChartIcon /> {refreshing ? "Refreshing..." : "Refresh ranks"}
-        </button>
-      </div>
-      <div className="placement-source">
-        <span>Source: <a href={payload.source_url} target="_blank" rel="noreferrer">Hollywoodbets Gaming</a></span>
-        <span>Checked {formatTimestamp(payload.scraped_at)}</span>
-      </div>
-      <section className="stat-grid placement-summary" aria-label="Placement summary">
-        <Kpi icon={<MedalIcon />} label="Visible games" value={whole.format(number(summary.scraped_games))} tone="blue" />
-        <Kpi icon={<GamepadIcon />} label="Model matches" value={whole.format(number(summary.matched_games))} tone="mint" />
-        <Kpi icon={<ChartIcon />} label="Move higher" value={whole.format(number(summary.move_higher))} tone="green" />
-        <Kpi icon={<ScaleIcon />} label="Move lower" value={whole.format(number(summary.move_lower))} tone="pink" />
-        <Kpi icon={<GemIcon />} label="Promote" value={whole.format(number(summary.promote))} tone="lime" />
-      </section>
-      <div className="placement-table-heading">
-        <div>
-          <h3><PlacementIcon /> Recommended rank changes</h3>
-          <p>Higher placement means a stronger balanced forecast score. Recommendations are advisory.</p>
-        </div>
-        <span className="placement-status" role="status">{status === "loading" ? "Updating..." : `${whole.format(payload.recommendations?.length ?? 0)} recommendations`}</span>
-      </div>
-      {status === "error" && <p className="upload-status error" role="alert">{message}</p>}
-      <div className="table-wrap placement-table-wrap">
-        <table className="placement-table">
-          <thead>
-            <tr>
-              <th>Game</th>
-              <th>Action</th>
-              <th>Current</th>
-              <th>Recommended</th>
-              <th>Change</th>
-              <th>Score</th>
-              <th>Predicted stakes</th>
-              <th>Predicted clients</th>
-              <th>High performance</th>
-              <th>Confidence</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(payload.recommendations ?? []).map((row, index) => (
-              <tr key={`${row.game_id ?? row.lobby_title}-${index}`}>
-                <td>
-                  <strong>{row.lobby_title || row.tournament_name || "-"}</strong>
-                  <small>{row.system_name || row.provider || "No model match"}</small>
-                </td>
-                <td><span className={`placement-action ${placementTone(row.placement_action)}`}>{row.placement_action}</span></td>
-                <td className="num">{row.current_rank ? `#${row.current_rank}` : "-"}</td>
-                <td className="num">{row.recommended_rank ? `#${row.recommended_rank}` : "-"}</td>
-                <td className={`num ${number(row.rank_delta) > 0 ? "positive" : number(row.rank_delta) < 0 ? "negative" : ""}`}>{row.rank_delta === null || row.rank_delta === undefined ? "-" : `${number(row.rank_delta) > 0 ? "+" : ""}${row.rank_delta}`}</td>
-                <td className="num">{row.placement_score === null || row.placement_score === undefined ? "-" : `${number(row.placement_score).toFixed(1)}`}</td>
-                <td className="num">{row.predicted_stakes === null ? "-" : money.format(number(row.predicted_stakes))}</td>
-                <td className="num">{row.predicted_clients === null ? "-" : whole.format(number(row.predicted_clients))}</td>
-                <td className="num">{row.probability_high_performance === null ? "-" : pct.format(number(row.probability_high_performance))}</td>
-                <td className="num">{row.confidence === null ? "-" : pct.format(number(row.confidence))}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
+    <iframe
+      className="placement-platform"
+      src="./game-placement/index.html"
+      title="Game Movement placement platform"
+    />
   );
-}
-
-function PlacementState({ title, message, busy = false, children }) {
-  return (
-    <section className="sheet-page quest-card placement-page placement-state" aria-busy={busy}>
-      <div className="sheet-page-heading">
-        <span className="badge-icon"><PlacementIcon /></span>
-        <div><h2>{title}</h2><p>{message}</p></div>
-      </div>
-      {busy && <div className="upload-progress" role="progressbar" aria-label="Loading placement recommendations"><span /></div>}
-      {children}
-    </section>
-  );
-}
-
-function formatTimestamp(value) {
-  if (!value) return "-";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("en-ZA", { dateStyle: "medium", timeStyle: "short" });
-}
-
-function placementTone(action) {
-  if (action === "Move higher" || action === "Promote into visible ranks") return "up";
-  if (action === "Move lower") return "down";
-  if (action === "No model match") return "unknown";
-  return "hold";
 }
 
 function UploadPage({ onDashboardData, reportUrls, onReportUrlsChange }) {
