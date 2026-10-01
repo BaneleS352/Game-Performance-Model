@@ -33,7 +33,7 @@ Prerequisites:
 
 - Python 3.11 or newer
 - Node.js 20 or newer
-- `pnpm`
+- `npm` (bundled with Node.js)
 
 ```bash
 git clone <repo-url>
@@ -48,8 +48,8 @@ python -m venv .venv
 .\.venv\Scripts\python -m pip install -e ".[dev]"
 
 cd dashboard
-pnpm install
-pnpm dev
+npm install
+npm run dev
 ```
 
 macOS/Linux:
@@ -60,8 +60,8 @@ python -m venv .venv
 .venv/bin/python -m pip install -e ".[dev]"
 
 cd dashboard
-pnpm install
-pnpm dev
+npm install
+npm run dev
 ```
 
 Open `http://127.0.0.1:5173`, upload your workbook, choose a worksheet, and run
@@ -82,13 +82,13 @@ In Windows PowerShell:
 
 If the browser shows proxy errors for `/api/dashboard-data` or `/api/uploads`,
 the Python API did not start. Install the Python dependencies with the matching
-`.venv` command above, then restart `pnpm dev` from `dashboard/`.
+`.venv` command above, then restart `npm run dev` from `dashboard/`.
 
 To build a static dashboard after data has been generated:
 
 ```bash
 cd dashboard
-pnpm build
+npm run build
 ```
 
 Then open `artifacts/dashboard/index.html`.
@@ -101,12 +101,15 @@ from `artifacts/dashboard/dashboard_data.js`.
 ```bash
 python -m game_performance.dashboard
 cd dashboard
-pnpm install
-pnpm build
+npm install
+npm run build
 ```
 
 Open `artifacts/dashboard/index.html` after building. The dashboard shows
 curated Top Stakes and Top Clients ledger views with focused forecast ranges.
+The build also copies the game-placement view to
+`artifacts/dashboard/game-placement/index.html`; in development it is available
+at `http://127.0.0.1:5173/game-placement/`.
 
 The private source workbook and generated outputs are not included in the repository. Static compilation and unit tests validate the refactored code paths; each user must train a model from their own uploaded data.
 
@@ -117,8 +120,8 @@ Start the Vite dashboard:
 ```bash
 python -m pip install -e ".[dev]"
 cd dashboard
-pnpm install
-pnpm dev
+npm install
+npm run dev
 ```
 
 Open `http://127.0.0.1:5173`, choose a CSV or Excel file (`.csv`, `.xls`, `.xlsx`, `.xlsb`, or `.xlsm`) and worksheet, then run the full production model. The selected sheet must include `Date`, `SystemName`, `TournamentName`, `Clients`, `BetCount`, `Stakes`, and `GGR` columns; casing is accepted case-insensitively. The upload runs the same four notebook stages through the reusable `game_performance` modules: data cleaning, lifecycle feature engineering, full regression and classification training, then forecasting, reporting, and dashboard publishing. Each upload and generated report is kept under `data/uploads/` and `artifacts/uploads/`; the latest successful run also publishes the processed data, features, model artifact, and dashboard.
@@ -132,3 +135,11 @@ Uploaded data is split chronologically by unique launch date: 70% for training,
 After that evaluation, every forecast covers the next seven calendar days after
 the final observed date. `Prediction_Start` and `Prediction_End` show that
 window; forecasts are not labelled or calculated as lifecycle week-four values.
+
+## Tests
+
+Run the Python test suite from the project root:
+
+```bash
+python -m pytest
+```
