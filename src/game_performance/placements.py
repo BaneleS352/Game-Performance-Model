@@ -168,6 +168,33 @@ def parse_ranked_links(source_html: str, *, source_url: str = SOURCE_URL, limit:
     return sorted(ranked, key=lambda item: item.current_rank)
 
 
+def parse_movement_platform_games(source: str, *, source_url: str = SOURCE_URL) -> list[RankedGame]:
+    """Read the full game catalogue embedded in the movement platform data file."""
+    marker = "window.GAME_DATA="
+    if marker not in source:
+        raise ValueError("Game Movement data does not contain GAME_DATA.")
+    raw_payload = source.split(marker, 1)[1].strip().rstrip(";").strip()
+    payload = json.loads(raw_payload)
+    games = payload.get("games")
+    if not isinstance(games, list):
+        raise ValueError("Game Movement data does not contain a games catalogue.")
+
+    parsed: list[RankedGame] = []
+    seen: set[str] = set()
+    for item in games:
+        if not isinstance(item, dict):
+            continue
+        title = _text(item.get("name"))
+        key = normalize_game_name(title)
+        rank = item.get("position")
+        if not key or key in seen or not isinstance(rank, int) or rank < 1:
+            continue
+        seen.add(key)
+        slug = key.replace(" ", "-")
+        parsed.append(RankedGame(rank, urljoin(source_url, f"/gaming/games/{slug}"), title))
+    return sorted(parsed, key=lambda item: item.current_rank)
+
+
 def parse_game_detail(source_html: str, *, fallback_title: str = "") -> dict[str, str | None]:
     parser = _DetailParser()
     parser.feed(source_html)
@@ -321,41 +348,32 @@ def build_placement_recommendations(
     for game in ranked_games:
         match = match_model_game(game, scored)
         if match is None:
-            recommendations.append({
-                "game_id": None,
-                "tournament_name": None,
-                "system_name": None,
-                "lobby_title": game.lobby_title,
-                "provider": game.provider,
-                "current_rank": game.current_rank,
-                "recommended_rank": None,
-                "rank_delta": None,
-                "placement_action": "No model match",
-                "placement_score": None,
-                "predicted_stakes": None,
-                "predicted_clients": None,
-                "probability_high_performance": None,
-                "confidence": None,
-            })
             continue
-        matched_ids.add(str(match.get("Game_ID")))
+        game_id = str(match.get("Game_ID"))
+        if game_id in matched_ids:
+            continue
+        matched_ids.add(game_id)
         recommendations.append(_recommendation(match, current_rank=game.current_rank, lobby_title=game.lobby_title, provider=game.provider))
 
-    for row in scored[:MAX_VISIBLE_RANK]:
-        if str(row.get("Game_ID")) not in matched_ids:
-            recommendations.append(_recommendation(row, current_rank=None, lobby_title=row.get("TournamentName") or row.get("Game_ID") or "", provider=None))
-
-    action_order = {"Move higher": 0, "Promote into visible ranks": 1, "Hold": 2, "Move lower": 3, "No model match": 4}
-    recommendations.sort(key=lambda row: (action_order.get(row["placement_action"], 9), row["recommended_rank"] or 999, row["current_rank"] or 999))
+    recommendations.sort(key=lambda row: (-row["placement_score"], str(row.get("game_id", ""))))
+    for index, row in enumerate(recommendations, start=1):
+        row["recommended_rank"] = index
+        row["rank_delta"] = row["current_rank"] - index if row["current_rank"] is not None else None
+        if row["rank_delta"] is not None and row["rank_delta"] >= 3:
+            row["placement_action"] = "Move higher"
+        elif row["rank_delta"] is not None and row["rank_delta"] <= -3:
+            row["placement_action"] = "Move lower"
+        else:
+            row["placement_action"] = "Hold"
     actions = [row["placement_action"] for row in recommendations]
     summary = {
         "scraped_games": len(ranked_games),
-        "matched_games": sum(1 for action in actions if action != "No model match" and action != "Promote into visible ranks"),
+        "matched_games": len(recommendations),
         "move_higher": actions.count("Move higher"),
         "move_lower": actions.count("Move lower"),
         "hold": actions.count("Hold"),
-        "promote": actions.count("Promote into visible ranks"),
-        "unmatched": actions.count("No model match"),
+        "promote": 0,
+        "unmatched": len(ranked_games) - len(recommendations),
     }
     return {
         "source_url": source_url,
@@ -376,6 +394,13 @@ def _load_forecasts(project_root: Path) -> list[dict[str, Any]]:
     return forecasts
 
 
+def _load_movement_platform_games(project_root: Path) -> list[RankedGame]:
+    path = project_root / "game_movement_platform" / "data.js"
+    if not path.is_file():
+        raise FileNotFoundError("Game Movement platform data has not been exported.")
+    return parse_movement_platform_games(path.read_text(encoding="utf-8"))
+
+
 def get_placement_recommendations(
     project_root: str | Path,
     *,
@@ -392,7 +417,11 @@ def get_placement_recommendations(
         cached = cache.get(cache_key)
         if not refresh and cached and now - cached["created_at"] < CACHE_TTL:
             return cached["payload"]
-    payload = build_placement_recommendations(_load_forecasts(project_root), scrape_ranked_games(), scraped_at=now.isoformat())
+    payload = build_placement_recommendations(
+        _load_forecasts(project_root),
+        _load_movement_platform_games(project_root),
+        scraped_at=now.isoformat(),
+    )
     with cache_lock:
         cache[cache_key] = {"created_at": now, "payload": payload}
     return payload

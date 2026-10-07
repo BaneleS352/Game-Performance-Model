@@ -267,6 +267,59 @@ svg {
   font-weight: 900;
 }
 
+.processing-summary {
+  padding: 14px;
+  border: 1px solid rgba(70, 238, 169, 0.42);
+  border-radius: 8px;
+  background: rgba(19, 103, 78, 0.16);
+}
+
+.processing-summary h3,
+.processing-summary p {
+  margin: 0;
+}
+
+.processing-summary h3 {
+  color: var(--green);
+  font-size: 14px;
+}
+
+.processing-summary dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.processing-summary dl div {
+  padding: 8px;
+  border-radius: 6px;
+  background: rgba(7, 9, 24, 0.44);
+}
+
+.processing-summary dt {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.processing-summary dd {
+  margin: 3px 0 0;
+  color: #f8fbff;
+  font-size: 18px;
+  font-weight: 900;
+}
+
+.processing-summary p {
+  color: #d7dded;
+  font-size: 13px;
+}
+
+.processing-summary p strong {
+  color: var(--green);
+  font-size: 16px;
+}
+
 .report-downloads {
   display: inline-flex;
   flex-wrap: wrap;

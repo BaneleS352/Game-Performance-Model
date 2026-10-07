@@ -13,6 +13,7 @@ from game_performance.placements import (
     get_placement_recommendations,
     normalize_game_name,
     parse_game_detail,
+    parse_movement_platform_games,
     parse_ranked_links,
     score_forecasts,
 )
@@ -60,6 +61,14 @@ def test_ranked_link_parser_uses_embedded_trending_data_when_present():
     ]
 
 
+def test_movement_platform_parser_reads_full_catalogue():
+    source = 'window.GAME_DATA={"games":[{"name":"Top Game","position":1},{"name":"Later Game","position":3877}]};'
+
+    games = parse_movement_platform_games(source)
+
+    assert [(game.current_rank, game.lobby_title) for game in games] == [(1, "Top Game"), (3877, "Later Game")]
+
+
 def test_detail_parser_extracts_title_and_provider():
     detail = parse_game_detail("<title>Ignored | Hollywoodbets</title><h1>Jet X</h1><span>Provider</span><span>Smartsoft</span>")
 
@@ -98,7 +107,7 @@ def test_score_forecasts_keeps_explicit_zero_confidence_in_average():
     assert score_forecasts([row])[0]["confidence"] == 0.4
 
 
-def test_build_recommendations_classifies_moves_promotions_and_unmatched():
+def test_build_recommendations_uses_only_platform_matches_in_score_order():
     forecasts = [
         _forecast("A", "A Game", 1000, 100, 0.9, 0.9),
         _forecast("C", "C Game", 800, 80, 0.8, 0.8),
@@ -108,25 +117,26 @@ def test_build_recommendations_classifies_moves_promotions_and_unmatched():
     visible = [
         RankedGame(1, "https://www.hollywoodbets.net/gaming/games/b-game", "B Game"),
         RankedGame(2, "https://www.hollywoodbets.net/gaming/games/c-game", "C Game"),
-        RankedGame(3, "https://www.hollywoodbets.net/gaming/games/unknown", "Unknown Game"),
-        RankedGame(4, "https://www.hollywoodbets.net/gaming/games/a-game", "A Game"),
+        RankedGame(3, "https://www.hollywoodbets.net/gaming/games/a-game", "A Game"),
+        RankedGame(4, "https://www.hollywoodbets.net/gaming/games/platform-only", "Platform Only"),
     ]
 
     payload = build_placement_recommendations(forecasts, visible, scraped_at="2026-09-29T00:00:00+00:00")
-    actions = {row["lobby_title"]: row["placement_action"] for row in payload["recommendations"]}
+    recommendations = payload["recommendations"]
+    actions = {row["lobby_title"]: row["placement_action"] for row in recommendations}
 
-    assert actions["A Game"] == "Move higher"
-    assert actions["B Game"] == "Move lower"
+    assert [row["lobby_title"] for row in recommendations] == ["A Game", "C Game", "B Game"]
+    assert [row["recommended_rank"] for row in recommendations] == [1, 2, 3]
+    assert actions["A Game"] == "Hold"
+    assert actions["B Game"] == "Hold"
     assert actions["C Game"] == "Hold"
-    assert actions["Unknown Game"] == "No model match"
-    assert actions["E Game"] == "Promote into visible ranks"
     assert payload["summary"] == {
         "scraped_games": 4,
         "matched_games": 3,
-        "move_higher": 1,
-        "move_lower": 1,
-        "hold": 1,
-        "promote": 1,
+        "move_higher": 0,
+        "move_lower": 0,
+        "hold": 3,
+        "promote": 0,
         "unmatched": 1,
     }
 
@@ -136,7 +146,7 @@ def test_placement_cache_reuses_payload_until_refresh(tmp_path, monkeypatch):
     dashboard_dir.mkdir(parents=True)
     (dashboard_dir / "dashboard_data.json").write_text(json.dumps({"forecasts": [_forecast("A", "A", 100, 10, 0.5, 0.5)]}), encoding="utf-8")
     calls = []
-    monkeypatch.setattr("game_performance.placements.scrape_ranked_games", lambda: calls.append("scrape") or [])
+    monkeypatch.setattr("game_performance.placements._load_movement_platform_games", lambda _: calls.append("scrape") or [])
     cache = {}
 
     get_placement_recommendations(tmp_path, cache=cache)
