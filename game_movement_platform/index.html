@@ -86,7 +86,7 @@ function direction(s){if(s==null)return 'flat';if(s>=0.025)return 'up';if(s<=-0.
 function prettyPct(x){if(x==null)return '—';return (x>=0?'+':'')+(x*100).toFixed(1)+'%'}
 function sparkSVG(g){const vals=g.series.map(x=>x.stakes).filter(x=>x!=null);if(vals.length<2)return '<span style="color:#a6aec7;font-size:11px">No data</span>';const min=Math.min(...vals),max=Math.max(...vals),span=max-min||1;const pts=vals.map((v,i)=>`${(i/(vals.length-1))*100},${100-(v-min)/span*82-9}`).join(' ');const fill=direction(g._s?.momentum)==='down'?'#ff4b83':'#18de82';return `<svg viewBox="0 0 100 100" preserveAspectRatio="none" style="width:100%;height:32px"><polyline fill="none" stroke="${fill}" stroke-width="2.5" points="${pts}" /></svg>`}
 function renderSummary(){
- $('snapshot').textContent=`Position snapshot · ${games.filter(g=>g.position).length.toLocaleString()} games`;
+ $('snapshot').textContent=`Position snapshot · ${new Date(DATA.meta.positionSnapshot+'T00:00:00').toLocaleDateString('en-ZA',{day:'2-digit',month:'short',year:'numeric'})} · ${games.filter(g=>g.position).length.toLocaleString()} games`;
  $('statGames').textContent=games.length.toLocaleString();$('statMatched').textContent=DATA.meta.matchedCount.toLocaleString();
  const ranked=games.filter(g=>g._s).sort((a,b)=>b._s.momentum-a._s.momentum);$('statUp').textContent=ranked[0]?`${ranked[0].name} · ${prettyPct(ranked[0]._s.momentum)}`:'—';$('statDown').textContent=ranked.at(-1)?`${ranked.at(-1).name} · ${prettyPct(ranked.at(-1)._s.momentum)}`:'—';
 }

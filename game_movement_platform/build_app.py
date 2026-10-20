@@ -1,77 +1,132 @@
-import json, re, math
+"""Build the game-movement data file from the checked-in position scrapes."""
+
+from __future__ import annotations
+
+import json
+import re
+from difflib import SequenceMatcher
 from pathlib import Path
+
 import pandas as pd
-from rapidfuzz import process, fuzz
 
-BASE=Path('/mnt/data/game_movement_platform')
-JP=Path('/mnt/data/hollywoodbets_allgames_2026-09-11.json')
-CP=Path('/mnt/data/game_performance.csv')
-BASE.mkdir(parents=True, exist_ok=True)
 
-with open(JP, encoding='utf-8') as f:
-    pos_raw=json.load(f)
-pos=pd.DataFrame(pos_raw)
-perf=pd.read_csv(CP)
-pos=pos.sort_values('position').drop_duplicates('title', keep='first').copy()
+BASE = Path(__file__).resolve().parent
+SCRAPES = BASE / "Top Games Position Scrapes"
 
-def clean_name(s):
-    s=str(s or '').lower().replace('\u2019',"'").replace('&',' and ')
-    s=re.sub(r'\([^)]*\)',' ',s)
-    s=re.sub(r'^\s*[a-z0-9]{2,10}\s*[-:]\s*','',s)
-    s=re.sub(r'[^a-z0-9]+',' ',s)
-    return re.sub(r'\s+',' ',s).strip()
 
-perf['match_key']=perf['TournamentName'].map(clean_name)
-pos['match_key']=pos['title'].map(clean_name)
+def clean_name(value: object) -> str:
+    value = str(value or "").lower().replace("\u2019", "'").replace("&", " and ")
+    value = re.sub(r"\([^)]*\)", " ", value)
+    value = re.sub(r"^\s*[a-z0-9]{2,10}\s*[-:]\s*", "", value)
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", value)).strip()
 
-# Aggregate once at date + normalized game level.
-daily=(perf.groupby(['EventDateID','match_key'], as_index=False)[['UNIQUE_CLIENTS','BetCount','Stakes','GGR']].sum())
-all_dates=sorted(daily['EventDateID'].unique().tolist())
-key_stats=daily.groupby('match_key').agg(days=('EventDateID','size')).reset_index()
-choices=key_stats['match_key'].tolist()
 
-# Exact matches first. Fuzzy only for unmatched names.
-key_set=set(choices)
-match_map={}
-score_map={}
-for _,r in pos.iterrows():
-    k=r['match_key']
-    if k in key_set:
-        match_map[r['title']]=k; score_map[r['title']]=100
+def _load_positions(scrapes_dir: Path = SCRAPES) -> tuple[pd.DataFrame, list[str], dict[str, list[dict[str, str | int]]]]:
+    files = sorted(scrapes_dir.glob("hollywoodbets_games_*.csv"))
+    if not files:
+        raise FileNotFoundError(f"No position scrapes found in {scrapes_dir}")
 
-unmatched=pos[~pos['title'].isin(match_map)].copy()
-for _,r in unmatched.iterrows():
-    k=r['match_key']
-    if not k: continue
-    cand=process.extract(k, choices, scorer=fuzz.token_sort_ratio, limit=3, score_cutoff=84)
-    if cand:
-        best=cand[0]
-        second=cand[1] if len(cand)>1 else None
-        # High-confidence fuzzy, or a clear lead.
-        if best[1] >= 94 or (best[1] >= 88 and (second is None or best[1]-second[1] >= 5)):
-            match_map[r['title']]=best[0]; score_map[r['title']]=round(float(best[1]),1)
+    history = pd.concat((pd.read_csv(path) for path in files), ignore_index=True)
+    history["date"] = pd.to_datetime(history["date"], errors="raise")
+    history["position"] = pd.to_numeric(history["position"], errors="raise").astype(int)
+    history = history.sort_values(["date", "scraped_at", "position"]).drop_duplicates(["date", "title"], keep="last")
 
-# Avoid re-filtering the full daily dataframe for every game.
-groups={k:g.set_index('EventDateID') for k,g in daily.groupby('match_key', sort=False)}
-records=[]
-for _,r in pos.iterrows():
-    title=r['title']; sel=match_map.get(title)
-    series=[]
-    if sel is not None:
-        sub=groups[sel]
-        for d in all_dates:
-            if d in sub.index:
-                x=sub.loc[d]
-                # loc is a Series because date is unique per match_key.
-                series.append({'d':str(d),'players':int(x['UNIQUE_CLIENTS']),'bets':int(x['BetCount']),'stakes':float(x['Stakes']),'ggr':float(x['GGR'])})
-            else:
-                series.append({'d':str(d),'players':None,'bets':None,'stakes':None,'ggr':None})
-    else:
-        series=[{'d':str(d),'players':None,'bets':None,'stakes':None,'ggr':None} for d in all_dates]
-    records.append({'name':title,'position':int(r['position']),'image':r.get('src',''),'matchScore':score_map.get(title),'series':series})
+    latest_date = history["date"].max()
+    current = history.loc[history["date"].eq(latest_date)].sort_values("position").drop_duplicates("title", keep="first").copy()
+    position_dates = [value.strftime("%Y-%m-%d") for value in sorted(history["date"].unique())]
+    position_history = {
+        title: [
+            {"date": row.date.strftime("%Y-%m-%d"), "position": int(row.position)}
+            for row in rows.itertuples()
+        ]
+        for title, rows in history.groupby("title", sort=False)
+    }
+    return current, position_dates, position_history
 
-meta={'dates':all_dates,'positionsCount':len(pos),'matchedCount':len(match_map),'performanceGames':int(perf['TournamentName'].nunique()),'rows':int(len(perf))}
-(BASE/'data.js').write_text('window.GAME_DATA='+json.dumps({'meta':meta,'games':records},separators=(',',':'))+';', encoding='utf-8')
-print(meta)
-print('fuzzy matches', sum(1 for s in score_map.values() if s<100))
-print('unmatched', len(pos)-len(match_map))
+
+def _best_match(key: str, choices: list[str]) -> tuple[str, float] | None:
+    sorted_key = " ".join(sorted(key.split()))
+    scored = sorted(
+        ((candidate, SequenceMatcher(None, sorted_key, " ".join(sorted(candidate.split()))).ratio() * 100) for candidate in choices),
+        key=lambda item: item[1],
+        reverse=True,
+    )[:2]
+    if not scored:
+        return None
+    best = scored[0]
+    second_score = scored[1][1] if len(scored) > 1 else 0
+    return best if best[1] >= 94 or (best[1] >= 88 and best[1] - second_score >= 5) else None
+
+
+def build(base: Path = BASE, scrapes_dir: Path = SCRAPES) -> dict[str, object]:
+    positions, position_dates, position_history = _load_positions(scrapes_dir)
+    performance_files = sorted(scrapes_dir.glob("FB_DAY_TOURNAMENT*.csv"))
+    if not performance_files:
+        raise FileNotFoundError(f"No performance CSV found in {scrapes_dir}")
+    performance = pd.concat((pd.read_csv(path) for path in performance_files), ignore_index=True)
+    performance = performance.rename(columns={"Clients": "players", "BetCount": "bets", "Stakes": "stakes", "GGR": "ggr"})
+
+    positions["match_key"] = positions["title"].map(clean_name)
+    performance["match_key"] = performance["TournamentName"].map(clean_name)
+    daily = performance.groupby(["EventDateID", "match_key"], as_index=False)[["players", "bets", "stakes", "ggr"]].sum()
+    performance_dates = sorted(int(value) for value in daily["EventDateID"].unique())
+    choices = daily["match_key"].drop_duplicates().tolist()
+    choice_set = set(choices)
+
+    match_map: dict[str, str] = {}
+    score_map: dict[str, float] = {}
+    for row in positions.itertuples():
+        if row.match_key in choice_set:
+            match_map[row.title] = row.match_key
+            score_map[row.title] = 100
+            continue
+        match = _best_match(row.match_key, choices)
+        if match:
+            match_map[row.title], score_map[row.title] = match[0], round(match[1], 1)
+
+    groups = {key: rows.set_index("EventDateID") for key, rows in daily.groupby("match_key", sort=False)}
+    records = []
+    for row in positions.itertuples():
+        selected = match_map.get(row.title)
+        group = groups.get(selected) if selected else None
+        series = []
+        for day in performance_dates:
+            values = group.loc[day] if group is not None and day in group.index else None
+            series.append(
+                {
+                    "d": str(day),
+                    "players": int(values["players"]) if values is not None else None,
+                    "bets": int(values["bets"]) if values is not None else None,
+                    "stakes": float(values["stakes"]) if values is not None else None,
+                    "ggr": float(values["ggr"]) if values is not None else None,
+                }
+            )
+        records.append(
+            {
+                "name": row.title,
+                "position": int(row.position),
+                "image": row.src,
+                "matchScore": score_map.get(row.title),
+                "positionHistory": position_history[row.title],
+                "series": series,
+            }
+        )
+
+    meta = {
+        "dates": performance_dates,
+        "positionDates": position_dates,
+        "positionSnapshot": position_dates[-1],
+        "positionsCount": len(positions),
+        "matchedCount": len(match_map),
+        "performanceGames": int(performance["TournamentName"].nunique()),
+        "rows": len(performance),
+    }
+    (base / "data.js").write_text(
+        "window.GAME_DATA=" + json.dumps({"meta": meta, "games": records}, separators=(",", ":")) + ";",
+        encoding="utf-8",
+    )
+    return meta
+
+
+if __name__ == "__main__":
+    print(build())
