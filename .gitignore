@@ -1,6 +1,7 @@
 __pycache__/
 .ipynb_checkpoints/
 .pytest_cache/
+.pytest-tmp-local*/
 .venv/
 node_modules/
 .pnpm-store/
@@ -9,6 +10,33 @@ node_modules/
 #data/raw/*
 #data/uploads/*
 artifacts/*
+
+# Keep the maintained folder guide Markdown files while continuing to ignore
+# generated model, report, dashboard, and upload artifacts.
+!artifacts/
+artifacts/*
+!artifacts/artifacts.md
+!artifacts/dashboard/
+artifacts/dashboard/*
+!artifacts/dashboard/dashboard.md
+!artifacts/dashboard/assets/
+artifacts/dashboard/assets/*
+!artifacts/dashboard/assets/assets.md
+!artifacts/features/
+artifacts/features/*
+!artifacts/features/features.md
+!artifacts/models/
+artifacts/models/*
+!artifacts/models/models.md
+!artifacts/processed/
+artifacts/processed/*
+!artifacts/processed/processed.md
+!artifacts/reports/
+artifacts/reports/*
+!artifacts/reports/reports.md
+!artifacts/uploads/
+artifacts/uploads/*
+!artifacts/uploads/uploads.md
 
 # Keep directory placeholders if they are added later.
 !data/raw/.gitkeep

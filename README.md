@@ -132,3 +132,19 @@ Uploaded data is split chronologically by unique launch date: 70% for training,
 After that evaluation, every forecast covers the next seven calendar days after
 the final observed date. `Prediction_Start` and `Prediction_End` show that
 window; forecasts are not labelled or calculated as lifecycle week-four values.
+
+## Documentation
+
+The maintained documentation suite is in [`docs/README.md`](docs/README.md).
+It includes the platform overview, end-user guide, technology stack, data-flow
+and reporting reference, operational runbook, API endpoints, module reference,
+script and notebook guides, folder inventories, and documentation templates.
+
+Start here:
+
+- [Platform overview](docs/platform-overview.md)
+- [User guide](docs/user-guide.md)
+- [Data and reporting reference](docs/data-and-reporting.md)
+- [Data flow](docs/data-flow.md)
+- [Operational runbook](docs/operational-runbook.md)
+- [Documentation coverage](docs/documentation-coverage.md)
