@@ -13,9 +13,10 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .config import Settings
+from .placements import get_placement_recommendations
 from .upload_pipeline import run_full_production_pipeline, save_uploaded_workbook, workbook_sheets
 
 
@@ -31,6 +32,8 @@ class UploadState:
     uploads: dict[str, Path] = field(default_factory=dict)
     jobs: dict[str, dict] = field(default_factory=dict)
     jobs_lock: threading.Lock = field(default_factory=threading.Lock)
+    placement_cache: dict[str, dict] = field(default_factory=dict)
+    placement_cache_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 class DashboardRequestHandler(SimpleHTTPRequestHandler):
@@ -94,13 +97,35 @@ class DashboardRequestHandler(SimpleHTTPRequestHandler):
             return dict(job) if job else None
 
     def do_GET(self) -> None:
-        path = urlparse(self.path).path
+        request = urlparse(self.path)
+        path = request.path
         if path == "/api/dashboard-data":
             dashboard_path = self.state.project_root / "artifacts" / "dashboard" / "dashboard_data.json"
             if not dashboard_path.is_file():
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "Dashboard data has not been exported yet."})
                 return
             self._send_json(HTTPStatus.OK, json.loads(dashboard_path.read_text(encoding="utf-8")))
+            return
+        if path == "/api/placements":
+            try:
+                refresh = parse_qs(request.query).get("refresh") == ["1"]
+                payload = get_placement_recommendations(
+                    self.state.project_root,
+                    refresh=refresh,
+                    cache=self.state.placement_cache,
+                    cache_lock=self.state.placement_cache_lock,
+                )
+            except FileNotFoundError as error:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": str(error)})
+                return
+            except (ValueError, TimeoutError, OSError) as error:
+                self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(error)})
+                return
+            except Exception as error:
+                print(f"Placement scrape failed: {error}")
+                self._send_json(HTTPStatus.BAD_GATEWAY, {"error": "Placement data could not be refreshed. Check the server terminal for details."})
+                return
+            self._send_json(HTTPStatus.OK, payload)
             return
         match = RUN_REPORT_PATH.match(path)
         if match:

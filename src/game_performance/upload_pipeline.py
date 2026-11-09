@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
 import uuid
 from datetime import UTC, datetime
+from time import perf_counter
 from pathlib import Path
 from typing import Any, Callable
 
@@ -24,6 +26,7 @@ from .reporting import build_holdout_comparison, export_business_report, export_
 from .scoring import run_daily_lifecycle_scoring
 
 SUPPORTED_UPLOAD_EXTENSIONS = {".csv", ".xls", ".xlsx", ".xlsb", ".xlsm"}
+LOGGER = logging.getLogger(__name__)
 
 
 def safe_workbook_filename(filename: str) -> str:
@@ -127,6 +130,7 @@ def run_full_production_pipeline(
     """
     root = Path(project_root)
     workbook_path = Path(workbook_path)
+    started_at = perf_counter()
     if sheet_name not in workbook_sheets(workbook_path):
         raise ValueError(f"Worksheet not found: {sheet_name}")
 
@@ -135,11 +139,24 @@ def run_full_production_pipeline(
     run_id = f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}_{uuid.uuid4().hex[:8]}"
     run_dir = root / "artifacts" / "uploads" / run_id
 
-    _progress(progress_callback, 0.05, "Cleaning uploaded data")
-    cleaned = clean_game_daily(load_raw_workbook(workbook_path, sheet_name=sheet_name))
+    LOGGER.info("Processing uploaded workbook: %s", workbook_path.name)
+    _progress(progress_callback, 0.05, "Validating and cleaning uploaded data")
+    try:
+        cleaned = clean_game_daily(load_raw_workbook(workbook_path, sheet_name=sheet_name))
+    except Exception:
+        LOGGER.exception("Upload validation or cleaning failed for %s", workbook_path.name)
+        raise
     if cleaned.empty:
         raise ValueError("The selected worksheet has no valid rows to score.")
     cleaning_summary = dict(cleaned.attrs)
+    LOGGER.info(
+        "Upload cleaned: rows=%s duplicates_removed=%s invalid_rows=%s missing_values=%s outliers=%s",
+        cleaning_summary["output_rows"],
+        cleaning_summary["duplicate_rows_removed"],
+        cleaning_summary["invalid_rows"],
+        cleaning_summary["missing_values_found"],
+        cleaning_summary["outliers_detected"],
+    )
     impact_periods = detect_external_impact_periods(cleaned)
     uploaded_data_days = int(cleaned["Date"].dropna().nunique())
     cleaned_path = save_dataframe(cleaned, run_dir / "clean_game_daily.pkl")
@@ -250,6 +267,7 @@ def run_full_production_pipeline(
     _publish_file(model_path, settings.model_dir / "training_results.joblib")
     dashboard_path = _publish_dashboard(staged_dashboard, root / "artifacts" / "dashboard")
     _progress(progress_callback, 1.0, "Production run complete")
+    LOGGER.info("Upload processing complete in %.2fs", perf_counter() - started_at)
 
     return {
         "run_id": run_id,
@@ -275,6 +293,7 @@ def score_uploaded_workbook(
     """Score one uploaded sheet with an existing trained artifact."""
     root = Path(project_root)
     workbook_path = Path(workbook_path)
+    LOGGER.info("Scoring uploaded workbook: %s", workbook_path.name)
     if sheet_name not in workbook_sheets(workbook_path):
         raise ValueError(f"Worksheet not found: {sheet_name}")
 

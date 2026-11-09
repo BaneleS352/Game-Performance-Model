@@ -18,7 +18,14 @@ const hiddenWorkbookSheets = new Set(["Model Accuracy", "Classification Metrics"
 const workbookSheetLabels = {
   future_performance_score_calcul: "Future Performance Score Calculator",
 };
+const workbookMenuOrder = new Map([
+  ["Holdout Comparison", 0],
+  ["High Performers", 1],
+  ["Forecasts", 2],
+  ["future_performance_score_calcul", 3],
+]);
 const uploadPageName = "__new_workbook__";
+const placementPageName = "__game_placement__";
 const activeJobStorageKey = "game-performance-active-job";
 
 const money = new Intl.NumberFormat("en-ZA", {
@@ -249,6 +256,7 @@ function DashboardView({ data, onDashboardData, reportUrls, onReportUrlsChange }
     }));
   }, [data]);
   const isUploadPage = activeSheetName === uploadPageName;
+  const isPlacementPage = activeSheetName === placementPageName;
   const activeSheet = isUploadPage ? null : workbookSheets.find((sheet) => sheet.name === activeSheetName);
   const selectedColumns = ledgerModes[ledgerMode].columns;
   const ledgerMinWidth = selectedColumns.reduce((sum, column) => sum + Number.parseInt(column.width, 10), 0);
@@ -290,6 +298,8 @@ function DashboardView({ data, onDashboardData, reportUrls, onReportUrlsChange }
 
       {isUploadPage ? (
         <UploadPage onDashboardData={onDashboardData} reportUrls={reportUrls} onReportUrlsChange={onReportUrlsChange} />
+      ) : isPlacementPage ? (
+        <GamePlacementPage />
       ) : activeSheet ? (
         <SheetPage sheet={activeSheet} />
       ) : (
@@ -464,6 +474,7 @@ function UploadPanel({ onDashboardData, reportUrls, onReportUrlsChange }) {
   const [sheetName, setSheetName] = useState("");
   const [status, setStatus] = useState("idle");
   const [message, setMessage] = useState("");
+  const [quality, setQuality] = useState(null);
 
   useEffect(() => {
     const jobId = window.localStorage.getItem(activeJobStorageKey);
@@ -488,7 +499,8 @@ function UploadPanel({ onDashboardData, reportUrls, onReportUrlsChange }) {
           const result = job.result;
           onDashboardData(await readJson(await fetch("/api/dashboard-data")));
           setStatus("success");
-          setMessage(`${whole.format(result.summary.games_scored)} games scored from ${job.upload_name}.`);
+          setQuality(result.cleaning_summary || {});
+          setMessage("Production model complete.");
           onReportUrlsChange({ business: result.business_report_url, analysis: result.model_analysis_url });
         } else {
           setStatus("error");
@@ -517,6 +529,7 @@ function UploadPanel({ onDashboardData, reportUrls, onReportUrlsChange }) {
     setSheets([]);
     setSheetName("");
     setMessage("");
+    setQuality(null);
     onReportUrlsChange(null);
     window.localStorage.removeItem(activeJobStorageKey);
     setStatus("uploading");
@@ -541,6 +554,7 @@ function UploadPanel({ onDashboardData, reportUrls, onReportUrlsChange }) {
     if (!upload || !sheetName) return;
     setStatus("running");
     setMessage("Starting the complete production model. You can leave this section; the run will continue.");
+    setQuality(null);
     onReportUrlsChange(null);
     try {
       const job = await readJson(await fetch(`/api/uploads/${upload.id}/run`, {
@@ -592,6 +606,19 @@ function UploadPanel({ onDashboardData, reportUrls, onReportUrlsChange }) {
             <span />
           </div>
         )}
+        {status === "success" && quality && (
+          <section className="processing-summary" aria-labelledby="processing-summary-heading">
+            <h3 id="processing-summary-heading">File processed successfully</h3>
+            <dl>
+              <div><dt>Rows received</dt><dd>{whole.format(quality.original_rows ?? 0)}</dd></div>
+              <div><dt>Duplicate rows removed</dt><dd>{whole.format(quality.duplicate_rows_removed ?? 0)}</dd></div>
+              <div><dt>Missing values handled</dt><dd>{whole.format(quality.missing_values_found ?? 0)}</dd></div>
+              <div><dt>Invalid records removed</dt><dd>{whole.format(quality.invalid_rows ?? 0)}</dd></div>
+              <div><dt>Potential outliers detected</dt><dd>{whole.format(quality.outliers_detected ?? 0)}</dd></div>
+            </dl>
+            <p><strong>{whole.format(quality.final_rows ?? 0)}</strong> clean records are ready for analysis.</p>
+          </section>
+        )}
         {(message || reportUrls) && (
           <p className={`upload-status ${status}`} role={status === "error" ? "alert" : "status"} aria-live="polite">
             {message || "Reports are ready to download."} {reportUrls && (
@@ -608,7 +635,9 @@ function UploadPanel({ onDashboardData, reportUrls, onReportUrlsChange }) {
 }
 
 function WorkbookSheetTabs({ workbookSheets, activeSheetName, onOpenSheet }) {
-  const visibleSheets = workbookSheets.filter((sheet) => !hiddenWorkbookSheets.has(sheet.name));
+  const visibleSheets = workbookSheets
+    .filter((sheet) => !hiddenWorkbookSheets.has(sheet.name))
+    .sort((a, b) => (workbookMenuOrder.get(a.name) ?? 99) - (workbookMenuOrder.get(b.name) ?? 99));
   function openMenuSheet(event, sheetName) {
     onOpenSheet(sheetName);
     event.currentTarget.closest("details").open = false;
@@ -629,6 +658,12 @@ function WorkbookSheetTabs({ workbookSheets, activeSheetName, onOpenSheet }) {
         <button className={!activeSheetName ? "active" : ""} type="button" onClick={(event) => openMenuSheet(event, "")}>
           <GridIcon /> Dashboard
         </button>
+        <button className={activeSheetName === placementPageName ? "active" : ""} type="button" onClick={(event) => openMenuSheet(event, placementPageName)}>
+          <PlacementIcon /> Game Placement
+        </button>
+        <button className={activeSheetName === uploadPageName ? "active" : ""} type="button" onClick={(event) => openMenuSheet(event, uploadPageName)}>
+          <SheetIcon /> New Workbook
+        </button>
         {visibleSheets.map((sheet) => (
           <button
             className={sheet.name === activeSheetName ? "active" : ""}
@@ -639,11 +674,18 @@ function WorkbookSheetTabs({ workbookSheets, activeSheetName, onOpenSheet }) {
             <SheetIcon /> {sheetLabel(sheet.name)}
           </button>
         ))}
-        <button className={activeSheetName === uploadPageName ? "active" : ""} type="button" onClick={(event) => openMenuSheet(event, uploadPageName)}>
-          <SheetIcon /> New Workbook
-        </button>
       </nav>
     </details>
+  );
+}
+
+function GamePlacementPage() {
+  return (
+    <iframe
+      className="placement-platform"
+      src="./game-placement/index.html"
+      title="Game Movement placement platform"
+    />
   );
 }
 
@@ -788,6 +830,10 @@ function CloseIcon() {
 
 function SheetIcon() {
   return <IconBase><path d="M12 6h18l8 8v28H12V6Z" /><path d="M30 6v10h8M18 24h14M18 31h14M18 38h9" /></IconBase>;
+}
+
+function PlacementIcon() {
+  return <IconBase><path d="M10 38h28M14 33V22M24 33V14M34 33V8" /><path d="m30 12 4-4 4 4" /></IconBase>;
 }
 
 createRoot(document.getElementById("root")).render(<Dashboard />);
